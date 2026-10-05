@@ -1,0 +1,99 @@
+{
+  "name": "ubex-desktop",
+  "productName": "Ubex",
+  "version": "1.0.0",
+  "description": "Ubex for the desktop",
+  "homepage": "https://chat.ubex.ai",
+  "author": {
+    "name": "Ubex",
+    "email": "andrei@techvision.es"
+  },
+  "license": "UNLICENSED",
+  "main": "main.js",
+  "desktopName": "ubex.desktop",
+  "repository": "github:andreitechvision/ubex-desktop",
+  "scripts": {
+    "start": "electron .",
+    "dist:linux": "electron-builder --linux --publish never",
+    "dist:win": "electron-builder --win --publish never",
+    "dist": "electron-builder --linux --win --publish never"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
+  },
+  "devDependencies": {
+    "electron": "^44.5.1",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "ai.ubex.desktop",
+    "productName": "Ubex",
+    "copyright": "Ubex",
+    "files": [
+      "main.js",
+      "preload.js",
+      "picker.html",
+      "picker-preload.js",
+      "build/icon.png"
+    ],
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "andreitechvision",
+        "repo": "ubex-desktop"
+      }
+    ],
+    "protocols": [
+      {
+        "name": "Ubex",
+        "schemes": [
+          "ubex"
+        ]
+      }
+    ],
+    "linux": {
+      "target": [
+        "rpm",
+        "deb",
+        "AppImage"
+      ],
+      "icon": "build/icon.png",
+      "category": "Network",
+      "synopsis": "Ubex chat, projects and calls",
+      "executableName": "ubex",
+      "syncDesktopName": true
+    },
+    "rpm": {
+      "artifactName": "Ubex-x86_64.rpm"
+    },
+    "deb": {
+      "artifactName": "Ubex-amd64.deb"
+    },
+    "appImage": {
+      "artifactName": "Ubex-x86_64.AppImage"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "artifactName": "Ubex-Setup.exe",
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "Ubex"
+    }
+  }
+}
