@@ -1,13 +1,14 @@
 # The Windows installer, built on a real Windows machine (Wine on Linux is not reliable for it).
 #
-# Runs by itself when release.sh publishes a release, and adds Ubex-Chat-Setup.exe plus the
-# Windows update manifest (latest.yml) to that same release. Can also be started by hand for
-# an existing release: Actions → Windows installer → Run workflow → the tag (e.g. v1.3.0).
+# Runs by itself when release.sh pushes a version tag, and adds Ubex-Chat-Setup.exe plus the
+# Windows update manifest (latest.yml) to that version's release, which release.sh keeps as a
+# draft until this has finished. Can also be started by hand for an existing release:
+# Actions → Windows installer → Run workflow → the tag (e.g. v1.3.0).
 name: Windows installer
 
 on:
-  release:
-    types: [published]
+  push:
+    tags: ['v*']
   workflow_dispatch:
     inputs:
       tag:
@@ -21,7 +22,7 @@ jobs:
   build:
     runs-on: windows-latest
     env:
-      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      TAG: ${{ inputs.tag || github.ref_name }}
       GH_TOKEN: ${{ github.token }}
       # No code-signing certificate yet: build unsigned instead of looking for one.
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
@@ -48,6 +49,11 @@ jobs:
       - name: Add to the release
         shell: bash
         run: |
+          # release.sh creates the (draft) release right after pushing the tag; give it time.
+          for i in $(seq 1 60); do
+            gh release view "$TAG" >/dev/null 2>&1 && break
+            sleep 10
+          done
           gh release upload "$TAG" --clobber \
             dist/Ubex-Chat-Setup.exe \
             dist/Ubex-Chat-Setup.exe.blockmap \

@@ -25,8 +25,9 @@ It builds the Linux installers, pushes and tags the source, creates the GitHub r
 sets the latest version in the Ubex Chat interface so older installs show the update banner.
 Installed apps download the update by themselves and offer "Restart to update".
 
-Windows is built by GitHub Actions (`.github/workflows/windows.yml`) on a Windows machine:
-it starts when the release is published and adds `Ubex-Chat-Setup.exe` to it. To build it for
-an existing release: Actions → Windows installer → Run workflow → the tag.
+Windows is built by GitHub Actions (`.github/workflows/windows.yml`) on a Windows machine. The
+version tag starts it, it adds `Ubex-Chat-Setup.exe` to the release, and `release.sh` keeps
+the release a draft until then. To rebuild it for an existing release: Actions → Windows
+installer → Run workflow → the tag.
 
 The download links in Ubex Chat use `releases/latest/download/<file>`, so they follow the newest release.

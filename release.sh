@@ -6,14 +6,14 @@
 #   1. checks it is publishing as andreitechvision (never the active gh login by accident)
 #   2. sets the version in package.json and builds the Linux installers
 #   3. commits, tags and pushes to github.com/andreitechvision/ubex-desktop
-#   4. creates the GitHub release with the installers and the update manifest, which is what
-#      installed apps check to update themselves
+#   4. creates the GitHub release as a draft with the Linux installers, waits for GitHub
+#      Actions to add the Windows one (.github/workflows/windows.yml, started by the tag), then
+#      publishes it. Only then do "latest" downloads and installed apps' updaters see it, so no
+#      platform ever points at a file that is not there yet.
 #   5. sets DESKTOP_LATEST_VERSION in the interface and deploys it, so older installs show the
 #      "new version" banner. It runs only after the release exists, so the banner never points
 #      at files that are not there yet.
 #
-# Windows is built by GitHub Actions (.github/workflows/windows.yml) on a Windows machine. It
-# starts by itself once step 4 publishes the release and adds the .exe to it, 5-10 min later.
 set -euo pipefail
 
 ACCOUNT=andreitechvision
@@ -87,9 +87,29 @@ git tag "v$VERSION"
 push origin HEAD
 push origin "v$VERSION"
 
-# 4. The release.
-gh release create "v$VERSION" -R "$REPO" --title "Ubex Chat $VERSION" \
+# 4. The release: a draft until the Windows installer is in it.
+gh release create "v$VERSION" -R "$REPO" --draft --title "Ubex Chat $VERSION" \
   --notes "${NOTES:-Ubex Chat $VERSION}" "${FILES[@]}"
+
+echo "Waiting for the Windows installer (GitHub Actions, usually 5-10 minutes)..."
+RUN=""
+for i in $(seq 1 30); do
+  RUN="$(gh run list -R "$REPO" --workflow windows.yml --branch "v$VERSION" --limit 1 --json databaseId --jq '.[0].databaseId' 2>/dev/null || true)"
+  [ -n "$RUN" ] && break
+  sleep 10
+done
+if [ -z "$RUN" ]; then
+  echo "The Windows build did not start. The release is still a draft: check GitHub Actions, then run" >&2
+  echo "  gh release edit v$VERSION -R $REPO --draft=false --latest   and deploy $IFACE_FILE" >&2
+  exit 1
+fi
+if ! gh run watch "$RUN" -R "$REPO" --exit-status --interval 30 >/dev/null; then
+  echo "The Windows build failed: https://github.com/$REPO/actions/runs/$RUN" >&2
+  echo "The release is still a draft. Re-run the build there, then:" >&2
+  echo "  gh release edit v$VERSION -R $REPO --draft=false --latest   and deploy $IFACE_FILE" >&2
+  exit 1
+fi
+gh release edit "v$VERSION" -R "$REPO" --draft=false --latest >/dev/null
 
 # 5. The interface: the banner for older installs.
 sed -i "s/^export const DESKTOP_LATEST_VERSION = '[^']*';/export const DESKTOP_LATEST_VERSION = '$VERSION';/" \
