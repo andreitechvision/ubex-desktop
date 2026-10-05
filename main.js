@@ -1,4 +1,4 @@
-// Ubex for the desktop: a window around the live app at chat.ubex.ai.
+// Ubex Chat for the desktop: a window around the live app at chat.ubex.ai.
 //
 // The interface is not bundled here. It is the same site the browser loads, so every deploy
 // reaches the desktop app at once and there is no second copy of the frontend to keep in
@@ -32,12 +32,12 @@ function isAppUrl(url) {
   }
 }
 
-// ubex://meet/abc → https://chat.ubex.ai/meet/abc, so a link from an email or the browser
-// can open straight in the app.
+// ubex-chat://meet/abc → https://chat.ubex.ai/meet/abc, so a link from an email or the browser
+// can open straight in the app. Not ubex://, which belongs to the separate Ubex app.
 function appUrlFromArgs(argv) {
-  const link = (argv || []).find((a) => typeof a === 'string' && a.startsWith('ubex://'));
+  const link = (argv || []).find((a) => typeof a === 'string' && a.startsWith('ubex-chat://'));
   if (!link) return null;
-  const rest = link.slice('ubex://'.length).replace(/^\/+/, '');
+  const rest = link.slice('ubex-chat://'.length).replace(/^\/+/, '');
   return APP_URL + '/' + rest;
 }
 
@@ -47,8 +47,8 @@ if (!app.requestSingleInstanceLock()) {
   let mainWindow = null;
 
   // Windows groups notifications under this id; without it they are shown as "electron.app".
-  if (process.platform === 'win32') app.setAppUserModelId('ai.ubex.desktop');
-  if (!app.isDefaultProtocolClient('ubex')) app.setAsDefaultProtocolClient('ubex');
+  if (process.platform === 'win32') app.setAppUserModelId('ai.ubex.chat');
+  if (!app.isDefaultProtocolClient('ubex-chat')) app.setAsDefaultProtocolClient('ubex-chat');
 
   const background = () => (nativeTheme.shouldUseDarkColors ? '#000000' : '#ffffff');
 
@@ -108,7 +108,7 @@ if (!app.requestSingleInstanceLock()) {
       minWidth: 900,
       minHeight: 600,
       show: false,
-      title: 'Ubex',
+      title: 'Ubex Chat',
       autoHideMenuBar: true,
       backgroundColor: background(),
       icon: path.join(__dirname, 'build/icon.png'),
@@ -126,7 +126,7 @@ if (!app.requestSingleInstanceLock()) {
     return win;
   }
 
-  // Ubex links stay in the app (a meeting or board opened in a new tab gets its own window);
+  // Ubex Chat links stay in the app (a meeting or board opened in a new tab gets its own window);
   // everything else goes to the person's browser.
   function wireContents(contents) {
     contents.setWindowOpenHandler(({ url }) => {

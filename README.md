@@ -1,6 +1,6 @@
-# Ubex Desktop
+# Ubex Chat Desktop
 
-Ubex for Linux and Windows: an Electron window around https://chat.ubex.ai.
+Ubex Chat for Linux and Windows: an Electron window around https://chat.ubex.ai.
 
 Downloads: https://github.com/andreitechvision/ubex-desktop/releases/latest
 
@@ -9,8 +9,8 @@ Downloads: https://github.com/andreitechvision/ubex-desktop/releases/latest
 ```sh
 npm install
 npm start            # run from source
-npm run dist:linux   # dist/Ubex-x86_64.rpm, Ubex-amd64.deb, Ubex-x86_64.AppImage
-npm run dist:win     # dist/Ubex-Setup.exe (needs Wine when built on Linux)
+npm run dist:linux   # dist/Ubex-Chat-x86_64.rpm, Ubex-Chat-amd64.deb, Ubex-Chat-x86_64.AppImage
+npm run dist:win     # dist/Ubex-Chat-Setup.exe (needs Wine when built on Linux)
 ```
 
 On Fedora 44 the .rpm/.deb step needs `libcrypt.so.1` (`sudo dnf install libxcrypt-compat`); `release.sh` fetches it by itself.
@@ -22,13 +22,13 @@ On Fedora 44 the .rpm/.deb step needs `libcrypt.so.1` (`sudo dnf install libxcry
 ```
 
 It builds the Linux installers, pushes and tags the source, creates the GitHub release, and
-sets the latest version in the Ubex interface so older installs show the update banner.
+sets the latest version in the Ubex Chat interface so older installs show the update banner.
 Installed apps download the update by themselves and offer "Restart to update".
 
 Windows is built on a Windows PC (`npm run dist:win`) and added to the same release:
 
 ```sh
-gh release upload v<version> dist/Ubex-Setup.exe dist/Ubex-Setup.exe.blockmap dist/latest.yml
+gh release upload v<version> dist/Ubex-Chat-Setup.exe dist/Ubex-Chat-Setup.exe.blockmap dist/latest.yml
 ```
 
-The download links in the Ubex app use `releases/latest/download/<file>`, so they follow the newest release.
+The download links in Ubex Chat use `releases/latest/download/<file>`, so they follow the newest release.

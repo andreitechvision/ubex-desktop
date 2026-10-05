@@ -1,4 +1,4 @@
-// Tells the web app it is running inside the desktop app, so it can hide what only makes
+// Tells Ubex Chat (the web app) it is running inside the desktop app, so it can hide what only makes
 // sense in a browser (the rail's download button) and show the update banner.
 //
 // The update calls exist from 1.1.0 on; the web app checks for them before using them,

@@ -13,7 +13,7 @@
 #      at files that are not there yet.
 #
 # Windows is built on a Windows PC (npm run dist:win), then added to the same release:
-#   gh release upload v<version> dist/Ubex-Setup.exe dist/Ubex-Setup.exe.blockmap dist/latest.yml
+#   gh release upload v<version> dist/Ubex-Chat-Setup.exe dist/Ubex-Chat-Setup.exe.blockmap dist/latest.yml
 set -euo pipefail
 
 ACCOUNT=andreitechvision
@@ -69,7 +69,7 @@ npm version "$VERSION" --no-git-tag-version --allow-same-version >/dev/null
 rm -rf dist
 npm run dist:linux
 
-FILES=(dist/Ubex-x86_64.rpm dist/Ubex-amd64.deb dist/Ubex-x86_64.AppImage dist/latest-linux.yml)
+FILES=(dist/Ubex-Chat-x86_64.rpm dist/Ubex-Chat-amd64.deb dist/Ubex-Chat-x86_64.AppImage dist/latest-linux.yml)
 for f in "${FILES[@]}"; do
   [ -s "$f" ] || { echo "build did not produce $f" >&2; exit 1; }
 done
@@ -88,8 +88,8 @@ push origin HEAD
 push origin "v$VERSION"
 
 # 4. The release.
-gh release create "v$VERSION" -R "$REPO" --title "Ubex $VERSION" \
-  --notes "${NOTES:-Ubex $VERSION}" "${FILES[@]}"
+gh release create "v$VERSION" -R "$REPO" --title "Ubex Chat $VERSION" \
+  --notes "${NOTES:-Ubex Chat $VERSION}" "${FILES[@]}"
 
 # 5. The interface: the banner for older installs.
 sed -i "s/^export const DESKTOP_LATEST_VERSION = '[^']*';/export const DESKTOP_LATEST_VERSION = '$VERSION';/" \
@@ -99,4 +99,4 @@ grep -q "DESKTOP_LATEST_VERSION = '$VERSION'" "$ROOT/Frontend/Interface/$IFACE_F
 (cd "$ROOT/Backend/scripts" && python3 deploy_interface.py --label "Desktop app $VERSION released" "$IFACE_FILE")
 
 echo
-echo "Released Ubex $VERSION: https://github.com/$REPO/releases/tag/v$VERSION"
+echo "Released Ubex Chat $VERSION: https://github.com/$REPO/releases/tag/v$VERSION"
