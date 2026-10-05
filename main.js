@@ -4,9 +4,10 @@
 // reaches the desktop app at once and there is no second copy of the frontend to keep in
 // step. This file only adds what a browser tab gives for free and Electron does not: the
 // permission prompts (mic, camera, notifications), a screen-share picker, opening outside
-// links in the real browser, a right-click menu in text fields, and updates of the shell.
+// links in the real browser, a right-click menu in text fields, zoom, and updates of the shell.
 
 const { app, BrowserWindow, Menu, desktopCapturer, ipcMain, nativeTheme, session, shell } = require('electron');
+const fs = require('fs');
 const path = require('path');
 
 const APP_URL = 'https://chat.ubex.ai';
@@ -50,6 +51,55 @@ if (!app.requestSingleInstanceLock()) {
   if (!app.isDefaultProtocolClient('ubex')) app.setAsDefaultProtocolClient('ubex');
 
   const background = () => (nativeTheme.shouldUseDarkColors ? '#000000' : '#ffffff');
+
+  // ── Zoom ─────────────────────────────────────────────────────────────────────────────
+  // What browser zoom is in a tab: Ctrl + / Ctrl - / Ctrl 0 and Ctrl + mouse wheel, in the
+  // browser's own steps. Saved on THIS computer (userData/settings.json), not the account,
+  // so making the desktop app bigger leaves the web app as it is — the account-wide
+  // "Interface size" setting is the one that follows you everywhere. One level for every
+  // Ubex window, so a meeting opened in its own window matches the main one.
+  const ZOOM_STEPS = [0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3];
+  const settingsFile = () => path.join(app.getPath('userData'), 'settings.json');
+
+  function readSettings() {
+    try {
+      return JSON.parse(fs.readFileSync(settingsFile(), 'utf8')) || {};
+    } catch (e) {
+      return {};
+    }
+  }
+
+  function writeSettings(patch) {
+    try {
+      fs.writeFileSync(settingsFile(), JSON.stringify({ ...readSettings(), ...patch }));
+    } catch (e) {}
+  }
+
+  let zoom = ZOOM_STEPS.indexOf(readSettings().zoom) !== -1 ? readSettings().zoom : 1;
+
+  function applyZoom(contents) {
+    if (contents && !contents.isDestroyed()) contents.setZoomFactor(zoom);
+  }
+
+  // direction: 1 bigger, -1 smaller, 0 back to 100%.
+  function stepZoom(direction) {
+    const i = ZOOM_STEPS.indexOf(zoom);
+    const next = direction === 0 ? 1 : ZOOM_STEPS[Math.min(ZOOM_STEPS.length - 1, Math.max(0, (i === -1 ? 5 : i) + direction))];
+    zoom = next;
+    writeSettings({ zoom });
+    BrowserWindow.getAllWindows().forEach((w) => {
+      applyZoom(w.webContents);
+      if (!w.isDestroyed()) w.webContents.send('ubex:zoom', Math.round(zoom * 100));
+    });
+  }
+
+  function zoomKey(input) {
+    if (input.type !== 'keyDown' || !(input.control || input.meta) || input.alt) return null;
+    if (input.key === '+' || input.key === '=' || input.code === 'NumpadAdd') return 1;
+    if (input.key === '-' || input.key === '_' || input.code === 'NumpadSubtract') return -1;
+    if (input.key === '0' || input.code === 'Numpad0') return 0;
+    return null;
+  }
 
   function createWindow(startUrl) {
     const win = new BrowserWindow({
@@ -95,6 +145,15 @@ if (!app.requestSingleInstanceLock()) {
       if (/^(https?|mailto|tel):/i.test(url)) shell.openExternal(url);
     });
     contents.on('context-menu', (_event, params) => showContextMenu(contents, params));
+    // Zoom (see above). Chromium resets it on some navigations, so it is set again on each load.
+    contents.on('did-finish-load', () => applyZoom(contents));
+    contents.on('before-input-event', (event, input) => {
+      const direction = zoomKey(input);
+      if (direction === null) return;
+      event.preventDefault();
+      stepZoom(direction);
+    });
+    contents.on('zoom-changed', (_event, direction) => stepZoom(direction === 'in' ? 1 : -1));
   }
 
   // Electron has no right-click menu of its own. This is the browser's basic one for text

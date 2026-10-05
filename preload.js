@@ -18,4 +18,10 @@ contextBridge.exposeInMainWorld('ubexDesktop', {
     return () => ipcRenderer.removeListener('ubex:update', listener);
   },
   installUpdate: () => ipcRenderer.send('ubex:update-install'),
+  // The zoom level in percent, each time Ctrl + / - / 0 or Ctrl + wheel changes it (1.2.0 on).
+  onZoom: (callback) => {
+    const listener = (_event, percent) => callback(percent);
+    ipcRenderer.on('ubex:zoom', listener);
+    return () => ipcRenderer.removeListener('ubex:zoom', listener);
+  },
 });
