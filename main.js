@@ -190,15 +190,47 @@ if (!app.requestSingleInstanceLock()) {
     });
   }
 
-  // The shell updates itself from the GitHub releases (AppImage and Windows install it on
-  // restart; .rpm and .deb ask for the password through pkexec). The interface needs none of
-  // this: it is loaded live.
-  function checkForUpdates() {
+  // Updates of the shell, from the GitHub releases. The interface needs none of this: it is
+  // loaded live. The update downloads quietly; the web app shows the "Restart to update"
+  // banner (preload.js hands it the state) and installs it when the person asks.
+  //
+  // AppImage and Windows also install a downloaded update on quit, silently. .rpm and .deb
+  // do not: they need the password (pkexec), and a password prompt appearing as you close
+  // the app would make no sense, so for them it only ever happens from the banner.
+  let updater = null;
+  let updateState = { state: 'idle', version: '', percent: 0 };
+
+  function setUpdateState(next) {
+    updateState = { ...updateState, ...next };
+    BrowserWindow.getAllWindows().forEach((w) => {
+      if (!w.isDestroyed()) w.webContents.send('ubex:update', updateState);
+    });
+  }
+
+  function setUpUpdates() {
+    ipcMain.handle('ubex:update-state', () => updateState);
+    ipcMain.on('ubex:update-install', () => {
+      if (updater && updateState.state === 'ready') updater.quitAndInstall(false, true);
+    });
     if (!app.isPackaged) return;
     try {
-      const { autoUpdater } = require('electron-updater');
-      autoUpdater.checkForUpdatesAndNotify().catch(() => {});
-    } catch (e) {}
+      updater = require('electron-updater').autoUpdater;
+    } catch (e) {
+      return;
+    }
+    const packaged = process.env.APPIMAGE || process.platform === 'win32';
+    updater.autoDownload = true;
+    updater.autoInstallOnAppQuit = !!packaged;
+    updater.on('update-available', (info) => setUpdateState({ state: 'downloading', version: info.version, percent: 0 }));
+    updater.on('download-progress', (p) => setUpdateState({ state: 'downloading', percent: Math.round(p.percent || 0) }));
+    updater.on('update-downloaded', (info) => setUpdateState({ state: 'ready', version: info.version, percent: 100 }));
+    updater.on('error', () => {
+      if (updateState.state !== 'ready') setUpdateState({ state: 'error' });
+    });
+    const check = () => updater.checkForUpdates().catch(() => {});
+    check();
+    // People leave a chat app open for days; look again every four hours.
+    setInterval(check, 4 * 60 * 60 * 1000);
   }
 
   app.on('second-instance', (_event, argv) => {
@@ -221,7 +253,7 @@ if (!app.requestSingleInstanceLock()) {
     mainWindow.on('closed', () => {
       mainWindow = null;
     });
-    checkForUpdates();
+    setUpUpdates();
   });
 
   app.on('window-all-closed', () => app.quit());

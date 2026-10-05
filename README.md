@@ -13,15 +13,22 @@ npm run dist:linux   # dist/Ubex-x86_64.rpm, Ubex-amd64.deb, Ubex-x86_64.AppImag
 npm run dist:win     # dist/Ubex-Setup.exe (needs Wine when built on Linux)
 ```
 
-On Fedora 44 the .rpm/.deb step needs `libcrypt.so.1` (`sudo dnf install libxcrypt-compat`).
+On Fedora 44 the .rpm/.deb step needs `libcrypt.so.1` (`sudo dnf install libxcrypt-compat`); `release.sh` fetches it by itself.
 
 ## Release
 
-Bump `version` in package.json, build, then:
+```sh
+./release.sh 1.1.0 "What changed"
+```
+
+It builds the Linux installers, pushes and tags the source, creates the GitHub release, and
+sets the latest version in the Ubex interface so older installs show the update banner.
+Installed apps download the update by themselves and offer "Restart to update".
+
+Windows is built on a Windows PC (`npm run dist:win`) and added to the same release:
 
 ```sh
-gh release create v<version> dist/Ubex-x86_64.rpm dist/Ubex-amd64.deb dist/Ubex-x86_64.AppImage \
-  dist/Ubex-Setup.exe dist/Ubex-Setup.exe.blockmap dist/latest.yml dist/latest-linux.yml
+gh release upload v<version> dist/Ubex-Setup.exe dist/Ubex-Setup.exe.blockmap dist/latest.yml
 ```
 
 The download links in the Ubex app use `releases/latest/download/<file>`, so they follow the newest release.
