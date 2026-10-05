@@ -12,8 +12,8 @@
 #      "new version" banner. It runs only after the release exists, so the banner never points
 #      at files that are not there yet.
 #
-# Windows is built on a Windows PC (npm run dist:win), then added to the same release:
-#   gh release upload v<version> dist/Ubex-Chat-Setup.exe dist/Ubex-Chat-Setup.exe.blockmap dist/latest.yml
+# Windows is built by GitHub Actions (.github/workflows/windows.yml) on a Windows machine. It
+# starts by itself once step 4 publishes the release and adds the .exe to it, 5-10 min later.
 set -euo pipefail
 
 ACCOUNT=andreitechvision

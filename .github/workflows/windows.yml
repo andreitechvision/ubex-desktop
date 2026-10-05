@@ -1,0 +1,54 @@
+# The Windows installer, built on a real Windows machine (Wine on Linux is not reliable for it).
+#
+# Runs by itself when release.sh publishes a release, and adds Ubex-Chat-Setup.exe plus the
+# Windows update manifest (latest.yml) to that same release. Can also be started by hand for
+# an existing release: Actions → Windows installer → Run workflow → the tag (e.g. v1.3.0).
+name: Windows installer
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to build, e.g. v1.3.0
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+      # No code-signing certificate yet: build unsigned instead of looking for one.
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - run: npx electron-builder --win --publish never
+
+      - name: Check the build matches the release
+        shell: bash
+        run: |
+          test -s dist/Ubex-Chat-Setup.exe
+          grep -q "^version: ${TAG#v}$" dist/latest.yml || { echo "dist/latest.yml is not ${TAG#v}"; cat dist/latest.yml; exit 1; }
+
+      - name: Add to the release
+        shell: bash
+        run: |
+          gh release upload "$TAG" --clobber \
+            dist/Ubex-Chat-Setup.exe \
+            dist/Ubex-Chat-Setup.exe.blockmap \
+            dist/latest.yml
