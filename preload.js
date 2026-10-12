@@ -22,6 +22,14 @@ contextBridge.exposeInMainWorld('ubexDesktop', {
   // clicked), and highlight it in the taskbar until it is focused (a message arrived).
   focus: () => ipcRenderer.send('ubex:focus'),
   attention: () => ipcRenderer.send('ubex:attention'),
+  // A system notification shown by the desktop app itself (1.3.2 on), so that clicking it can
+  // bring the window forward on Wayland. `onNotificationClick` gets the `id` back.
+  notify: ({ id, title, body, tag }) => ipcRenderer.send('ubex:notify', { id, title, body, tag }),
+  onNotificationClick: (callback) => {
+    const listener = (_event, id) => callback(id);
+    ipcRenderer.on('ubex:notification-click', listener);
+    return () => ipcRenderer.removeListener('ubex:notification-click', listener);
+  },
   // The zoom level in percent, each time Ctrl + / - / 0 or Ctrl + wheel changes it (1.2.0 on).
   onZoom: (callback) => {
     const listener = (_event, percent) => callback(percent);

@@ -7,7 +7,7 @@
 // links in the real browser, a right-click menu in text fields, zoom, raising the window when
 // a notification is clicked, and updates of the shell.
 
-const { app, BrowserWindow, Menu, desktopCapturer, ipcMain, nativeTheme, session, shell } = require('electron');
+const { app, BrowserWindow, Menu, Notification, desktopCapturer, ipcMain, nativeTheme, session, shell } = require('electron');
 const fs = require('fs');
 const path = require('path');
 
@@ -309,13 +309,58 @@ if (!app.requestSingleInstanceLock()) {
     return win && !win.isDestroyed() ? win : null;
   }
 
+  function raise(win) {
+    if (!win || win.isDestroyed()) return;
+    if (win.isMinimized()) win.restore();
+    win.show();
+    win.focus();
+  }
+
+  // System notifications are shown from here (1.3.2 on), not by the page's own
+  // `new Notification()`. On Wayland (Fedora's GNOME) a window may only come to the front with
+  // the one-time activation token GNOME hands over when a notification is clicked. Electron
+  // stores it just before it reports the click, so the window has to be raised in that same
+  // click handler — which only this process has. The page's notification reached its onclick
+  // late, went through IPC to get back here, and could be garbage-collected (click lost) before
+  // it was ever clicked; so the click opened nothing. Each one is kept in `shown` until it
+  // closes, which is what keeps its click alive. One per conversation (`tag`), like the page's.
+  const shown = new Map();
+  const MAX_SHOWN = 30;
+
+  function showNotification(win, { id, title, body, tag }) {
+    if (!Notification.isSupported()) return;
+    const key = String(tag || id || '');
+    const previous = shown.get(key);
+    if (previous) {
+      shown.delete(key);
+      previous.close();
+    }
+    const note = new Notification({
+      title: String(title || 'Ubex Chat').slice(0, 200),
+      body: String(body || '').slice(0, 500),
+      icon: path.join(__dirname, 'build/icon.png'),
+      // The page plays the account's own chime; a system sound on top would double it.
+      silent: true,
+    });
+    const forget = () => {
+      if (shown.get(key) === note) shown.delete(key);
+    };
+    note.on('click', () => {
+      raise(win);
+      if (!win.isDestroyed()) win.webContents.send('ubex:notification-click', id);
+      forget();
+    });
+    note.on('close', forget);
+    shown.set(key, note);
+    while (shown.size > MAX_SHOWN) shown.delete(shown.keys().next().value);
+    note.show();
+  }
+
   function setUpNotifications() {
-    ipcMain.on('ubex:focus', (event) => {
+    ipcMain.on('ubex:focus', (event) => raise(windowOf(event)));
+    ipcMain.on('ubex:notify', (event, payload) => {
       const win = windowOf(event);
-      if (!win) return;
-      if (win.isMinimized()) win.restore();
-      win.show();
-      win.focus();
+      if (win && payload && typeof payload === 'object') showNotification(win, payload);
     });
     // A new message while the window is in the background: highlight it in the taskbar
     // (the urgency hint on Linux, a flashing button on Windows) until it is focused.
