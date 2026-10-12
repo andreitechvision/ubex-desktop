@@ -4,7 +4,8 @@
 // reaches the desktop app at once and there is no second copy of the frontend to keep in
 // step. This file only adds what a browser tab gives for free and Electron does not: the
 // permission prompts (mic, camera, notifications), a screen-share picker, opening outside
-// links in the real browser, a right-click menu in text fields, zoom, and updates of the shell.
+// links in the real browser, a right-click menu in text fields, zoom, raising the window when
+// a notification is clicked, and updates of the shell.
 
 const { app, BrowserWindow, Menu, desktopCapturer, ipcMain, nativeTheme, session, shell } = require('electron');
 const fs = require('fs');
@@ -117,10 +118,16 @@ if (!app.requestSingleInstanceLock()) {
         contextIsolation: true,
         sandbox: true,
         spellcheck: true,
+        // Message chimes and call rings play without a click first. Electron's default too,
+        // but stated, because the app depends on it: a chat app is often started and left
+        // in the background without ever being clicked, and a call must still ring.
+        autoplayPolicy: 'no-user-gesture-required',
         additionalArguments: ['--ubex-version=' + app.getVersion()],
       },
     });
     win.once('ready-to-show', () => win.show());
+    // The taskbar highlight asked for by a notification (ubex:attention) ends when you look.
+    win.on('focus', () => win.flashFrame(false));
     wireContents(win.webContents);
     win.loadURL(startUrl || APP_URL);
     return win;
@@ -292,6 +299,32 @@ if (!app.requestSingleInstanceLock()) {
     setInterval(check, 4 * 60 * 60 * 1000);
   }
 
+  // Notifications (1.3.1 on). The web app shows them itself; what it cannot do from inside the
+  // page is bring the window forward. A renderer's window.focus() does nothing to a window
+  // that is minimized or behind other apps, so clicking a system notification opened the
+  // conversation out of sight.
+  function windowOf(event) {
+    if (!event.senderFrame || !isAppUrl(event.senderFrame.url)) return null;
+    const win = BrowserWindow.fromWebContents(event.sender);
+    return win && !win.isDestroyed() ? win : null;
+  }
+
+  function setUpNotifications() {
+    ipcMain.on('ubex:focus', (event) => {
+      const win = windowOf(event);
+      if (!win) return;
+      if (win.isMinimized()) win.restore();
+      win.show();
+      win.focus();
+    });
+    // A new message while the window is in the background: highlight it in the taskbar
+    // (the urgency hint on Linux, a flashing button on Windows) until it is focused.
+    ipcMain.on('ubex:attention', (event) => {
+      const win = windowOf(event);
+      if (win && !win.isFocused()) win.flashFrame(true);
+    });
+  }
+
   app.on('second-instance', (_event, argv) => {
     if (!mainWindow) return;
     const url = appUrlFromArgs(argv);
@@ -308,6 +341,7 @@ if (!app.requestSingleInstanceLock()) {
 
   app.whenReady().then(() => {
     setUpSession();
+    setUpNotifications();
     mainWindow = createWindow(appUrlFromArgs(process.argv));
     mainWindow.on('closed', () => {
       mainWindow = null;

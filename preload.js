@@ -18,6 +18,10 @@ contextBridge.exposeInMainWorld('ubexDesktop', {
     return () => ipcRenderer.removeListener('ubex:update', listener);
   },
   installUpdate: () => ipcRenderer.send('ubex:update-install'),
+  // Notifications (1.3.1 on): bring this window to the front (a system notification was
+  // clicked), and highlight it in the taskbar until it is focused (a message arrived).
+  focus: () => ipcRenderer.send('ubex:focus'),
+  attention: () => ipcRenderer.send('ubex:attention'),
   // The zoom level in percent, each time Ctrl + / - / 0 or Ctrl + wheel changes it (1.2.0 on).
   onZoom: (callback) => {
     const listener = (_event, percent) => callback(percent);
