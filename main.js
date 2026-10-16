@@ -179,7 +179,9 @@ if (!app.requestSingleInstanceLock()) {
     } else if (params.selectionText) {
       items.push({ role: 'copy' });
     }
-    if (params.linkURL && !isAppUrl(params.linkURL)) {
+    // Only what the window and new-tab handlers also hand to the system: another scheme (file:,
+    // smb:, ms-msdt:, search-ms: …) would let the OS run whatever handler it has for it.
+    if (params.linkURL && !isAppUrl(params.linkURL) && /^(https?|mailto|tel):/i.test(params.linkURL)) {
       if (items.length) items.push({ type: 'separator' });
       items.push({ label: 'Open link in browser', click: () => shell.openExternal(params.linkURL) });
     }
