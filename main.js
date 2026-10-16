@@ -7,7 +7,7 @@
 // links in the real browser, a right-click menu in text fields, zoom, raising the window when
 // a notification is clicked, and updates of the shell.
 
-const { app, BrowserWindow, Menu, Notification, desktopCapturer, ipcMain, nativeTheme, session, shell } = require('electron');
+const { app, BrowserWindow, Menu, Notification, desktopCapturer, ipcMain, nativeImage, nativeTheme, net, session, shell } = require('electron');
 const fs = require('fs');
 const path = require('path');
 
@@ -327,8 +327,34 @@ if (!app.requestSingleInstanceLock()) {
   const shown = new Map();
   const MAX_SHOWN = 30;
 
-  function showNotification(win, { id, title, body, tag }) {
+  // A notification's icon (1.3.3 on): the picture of the organization it comes from, which the page
+  // names by URL (the avatars bucket). Downloaded once per URL and kept; anything that is not an https
+  // image that loads falls back to the app's own icon, as before.
+  const DEFAULT_ICON = path.join(__dirname, 'build/icon.png');
+  const icons = new Map();
+
+  async function iconFor(url) {
+    if (typeof url !== 'string' || !/^https:\/\//.test(url) || url.length > 2000) return DEFAULT_ICON;
+    if (icons.has(url)) return icons.get(url);
+    let icon = DEFAULT_ICON;
+    try {
+      const res = await net.fetch(url);
+      if (res.ok) {
+        const image = nativeImage.createFromBuffer(Buffer.from(await res.arrayBuffer()));
+        if (!image.isEmpty()) icon = image.resize({ width: 128, height: 128 });
+      }
+    } catch (e) {
+      icon = DEFAULT_ICON;
+    }
+    icons.set(url, icon);
+    while (icons.size > 50) icons.delete(icons.keys().next().value);
+    return icon;
+  }
+
+  async function showNotification(win, { id, title, body, tag, icon }) {
     if (!Notification.isSupported()) return;
+    const image = await iconFor(icon);
+    if (win.isDestroyed()) return;
     const key = String(tag || id || '');
     const previous = shown.get(key);
     if (previous) {
@@ -338,7 +364,7 @@ if (!app.requestSingleInstanceLock()) {
     const note = new Notification({
       title: String(title || 'Ubex Chat').slice(0, 200),
       body: String(body || '').slice(0, 500),
-      icon: path.join(__dirname, 'build/icon.png'),
+      icon: image,
       // The page plays the account's own chime; a system sound on top would double it.
       silent: true,
     });

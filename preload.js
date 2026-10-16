@@ -24,7 +24,8 @@ contextBridge.exposeInMainWorld('ubexDesktop', {
   attention: () => ipcRenderer.send('ubex:attention'),
   // A system notification shown by the desktop app itself (1.3.2 on), so that clicking it can
   // bring the window forward on Wayland. `onNotificationClick` gets the `id` back.
-  notify: ({ id, title, body, tag }) => ipcRenderer.send('ubex:notify', { id, title, body, tag }),
+  // `icon` (1.3.3 on): the organization's picture URL, or '' for the app's icon.
+  notify: ({ id, title, body, tag, icon }) => ipcRenderer.send('ubex:notify', { id, title, body, tag, icon: typeof icon === 'string' ? icon : '' }),
   onNotificationClick: (callback) => {
     const listener = (_event, id) => callback(id);
     ipcRenderer.on('ubex:notification-click', listener);
