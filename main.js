@@ -173,6 +173,13 @@ if (!app.requestSingleInstanceLock()) {
         // guardWebview below allows for a Google Meet link only, in the Meet session, with
         // nothing of Node or of this app inside it.
         webviewTag: true,
+        // (1.5.1) Full speed while minimized or covered. Electron's default throttles a hidden
+        // page, and on Windows a minimized or covered window IS hidden: measured here, a 100 ms
+        // timer fired 13 times in 12 s instead of 120, and Chromium slows it to about once a
+        // minute after five. The call engine runs on timers (the ring repeating, connecting,
+        // recovering, the sockets reconnecting), so a minimized app rang once and went quiet,
+        // and calls answered from it were slow to connect. Chat and call apps turn this off.
+        backgroundThrottling: false,
       },
     });
     win.once('ready-to-show', () => win.show());
@@ -350,6 +357,8 @@ if (!app.requestSingleInstanceLock()) {
         sandbox: true,
         spellcheck: true,
         autoplayPolicy: 'no-user-gesture-required',
+        // A meeting keeps running while its window is behind another one (see createWindow).
+        backgroundThrottling: false,
       },
     });
     meetWindows.set(code, win);
@@ -411,6 +420,7 @@ if (!app.requestSingleInstanceLock()) {
       webPreferences.contextIsolation = true;
       webPreferences.sandbox = true;
       webPreferences.webviewTag = false;
+      webPreferences.backgroundThrottling = false;
       meetSession();
       webPreferences.partition = MEET_PARTITION;
       params.partition = MEET_PARTITION;
