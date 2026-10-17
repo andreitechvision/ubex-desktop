@@ -169,6 +169,10 @@ if (!app.requestSingleInstanceLock()) {
         // in the background without ever being clicked, and a call must still ring.
         autoplayPolicy: 'no-user-gesture-required',
         additionalArguments: ['--ubex-version=' + app.getVersion()],
+        // Google Meet inside the app (1.5.0 on): the web app shows it in a <webview>, which
+        // guardWebview below allows for a Google Meet link only, in the Meet session, with
+        // nothing of Node or of this app inside it.
+        webviewTag: true,
       },
     });
     win.once('ready-to-show', () => win.show());
@@ -184,7 +188,7 @@ if (!app.requestSingleInstanceLock()) {
   function wireContents(contents) {
     contents.setWindowOpenHandler(({ url }) => {
       if (isGoogleMeetUrl(url)) {
-        openMeetWindow(url);
+        meetLink(contents, url);
         return { action: 'deny' };
       }
       if (isAppUrl(url)) {
@@ -199,7 +203,7 @@ if (!app.requestSingleInstanceLock()) {
     contents.on('will-navigate', (event, url) => {
       if (isAppUrl(url)) return;
       event.preventDefault();
-      if (isGoogleMeetUrl(url)) openMeetWindow(url);
+      if (isGoogleMeetUrl(url)) meetLink(contents, url);
       else if (/^(https?|mailto|tel):/i.test(url)) shell.openExternal(url);
     });
     contents.on('context-menu', (_event, params) => showContextMenu(contents, params));
@@ -359,6 +363,14 @@ if (!app.requestSingleInstanceLock()) {
       win.setTitle(title && title !== 'Meet' ? title : 'Google Meet');
     });
     const contents = win.webContents;
+    wireMeetContents(contents);
+    contents.on('did-finish-load', () => applyZoom(contents));
+    win.loadURL(url);
+  }
+
+  // What a Google Meet page may do, in its own window or in the app's <webview>: move between
+  // Google's own pages (Meet, the sign-in), and nothing else — other links go to the browser.
+  function wireMeetContents(contents) {
     contents.setWindowOpenHandler(({ url: next }) => {
       if (isGoogleMeetUrl(next)) openMeetWindow(next);
       else if (/^(https?|mailto|tel):/i.test(next)) shell.openExternal(next);
@@ -375,11 +387,42 @@ if (!app.requestSingleInstanceLock()) {
       else if (params.selectionText) items.push({ role: 'copy' });
       if (items.length) items.push({ type: 'separator' });
       // A way out when Google refuses something in here: the same meeting in the real browser.
-      items.push({ label: 'Open this meeting in your browser', click: () => shell.openExternal('https://meet.google.com/' + code) });
+      const code = meetCode(contents.getURL());
+      items.push({
+        label: 'Open this meeting in your browser',
+        click: () => shell.openExternal(code ? 'https://meet.google.com/' + code : 'https://meet.google.com/'),
+      });
       Menu.buildFromTemplate(items).popup();
     });
-    contents.on('did-finish-load', () => applyZoom(contents));
-    win.loadURL(url);
+  }
+
+  // Only a Google Meet link, in the Meet session, sandboxed, with no preload: whatever the page
+  // asked for in its <webview> tag. Anything else is refused before it is created.
+  function guardWebview(host) {
+    host.on('will-attach-webview', (event, webPreferences, params) => {
+      if (!isAppUrl(host.getURL()) || !isGoogleMeetUrl(params.src)) {
+        event.preventDefault();
+        return;
+      }
+      delete webPreferences.preload;
+      delete webPreferences.preloadURL;
+      webPreferences.nodeIntegration = false;
+      webPreferences.nodeIntegrationInSubFrames = false;
+      webPreferences.contextIsolation = true;
+      webPreferences.sandbox = true;
+      webPreferences.webviewTag = false;
+      meetSession();
+      webPreferences.partition = MEET_PARTITION;
+      params.partition = MEET_PARTITION;
+    });
+  }
+
+  // A Meet link from an app page: back to that page when it shows Meet itself (the web app asked
+  // for links with onMeetLink), else a window of its own.
+  const meetLinkPages = new Set();
+  function meetLink(contents, url) {
+    if (meetLinkPages.has(contents.id) && !contents.isDestroyed()) contents.send('ubex:meet-link', url);
+    else openMeetWindow(url);
   }
 
   function handleScreenShare(ses) {
@@ -534,6 +577,13 @@ if (!app.requestSingleInstanceLock()) {
     ipcMain.on('ubex:open-meet', (_event, url) => {
       if (isGoogleMeetUrl(String(url || ''))) openMeetWindow(String(url));
     });
+    // The web app shows Meet itself (1.5.0 on): Meet links clicked in its page go back to it.
+    ipcMain.on('ubex:meet-links', (event) => {
+      const contents = event.sender;
+      if (!isAppUrl(contents.getURL()) || meetLinkPages.has(contents.id)) return;
+      meetLinkPages.add(contents.id);
+      contents.once('destroyed', () => meetLinkPages.delete(contents.id));
+    });
     ipcMain.on('ubex:focus', (event) => raise(windowOf(event)));
     ipcMain.on('ubex:notify', (event, payload) => {
       const win = windowOf(event);
@@ -558,8 +608,14 @@ if (!app.requestSingleInstanceLock()) {
 
   app.on('web-contents-created', (_event, contents) => {
     // Windows opened by the app (setWindowOpenHandler 'allow') get the same rules.
+    // A Google Meet in the app's <webview> (guardWebview let it in): the Meet rules.
+    if (contents.getType() === 'webview') {
+      wireMeetContents(contents);
+      return;
+    }
     // The Google Meet windows have rules of their own (openMeetWindow) and are left alone.
     if (meetSes && contents.session === meetSes) return;
+    guardWebview(contents);
     if (contents.getType() === 'window' && mainWindow && contents !== mainWindow.webContents) wireContents(contents);
   });
 

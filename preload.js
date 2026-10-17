@@ -21,6 +21,16 @@ contextBridge.exposeInMainWorld('ubexDesktop', {
   // A Google Meet link in a window of the desktop app's own (1.4.0 on), instead of the browser.
   // The web app checks for this before using it (shared/meet-window.js).
   openGoogleMeet: (url) => ipcRenderer.send('ubex:open-meet', String(url || '')),
+  // Google Meet INSIDE the app's window (1.5.0 on): the web app may show it in a <webview>, which
+  // the main process allows for a Google Meet link only (Meet/GoogleMeetDock.jsx).
+  embedGoogleMeet: true,
+  // Meet links clicked in the page come back here instead of opening a window (1.5.0 on).
+  onMeetLink: (callback) => {
+    const listener = (_event, url) => callback(url);
+    ipcRenderer.on('ubex:meet-link', listener);
+    ipcRenderer.send('ubex:meet-links');
+    return () => ipcRenderer.removeListener('ubex:meet-link', listener);
+  },
   // Notifications (1.3.1 on): bring this window to the front (a system notification was
   // clicked), and highlight it in the taskbar until it is focused (a message arrived).
   focus: () => ipcRenderer.send('ubex:focus'),
