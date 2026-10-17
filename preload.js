@@ -18,6 +18,9 @@ contextBridge.exposeInMainWorld('ubexDesktop', {
     return () => ipcRenderer.removeListener('ubex:update', listener);
   },
   installUpdate: () => ipcRenderer.send('ubex:update-install'),
+  // A Google Meet link in a window of the desktop app's own (1.4.0 on), instead of the browser.
+  // The web app checks for this before using it (shared/meet-window.js).
+  openGoogleMeet: (url) => ipcRenderer.send('ubex:open-meet', String(url || '')),
   // Notifications (1.3.1 on): bring this window to the front (a system notification was
   // clicked), and highlight it in the taskbar until it is focused (a message arrived).
   focus: () => ipcRenderer.send('ubex:focus'),

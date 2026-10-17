@@ -5,7 +5,7 @@
 // step. This file only adds what a browser tab gives for free and Electron does not: the
 // permission prompts (mic, camera, notifications), a screen-share picker, opening outside
 // links in the real browser, a right-click menu in text fields, zoom, raising the window when
-// a notification is clicked, and updates of the shell.
+// a notification is clicked, updates of the shell, and Google Meet in a window of its own.
 
 const { app, BrowserWindow, Menu, Notification, desktopCapturer, ipcMain, nativeImage, nativeTheme, net, session, shell } = require('electron');
 const fs = require('fs');
@@ -28,6 +28,52 @@ const ALLOWED_PERMISSIONS = new Set([
 function isAppUrl(url) {
   try {
     return new URL(url).origin === APP_ORIGIN;
+  } catch (e) {
+    return false;
+  }
+}
+
+// ── Google Meet ──────────────────────────────────────────────────────────────────────
+// A Google Meet link opened from Ubex Chat (a public meet link, a meeting's Meet, a link in a
+// message) opens HERE, in a window of its own, instead of in the browser. The web app cannot do
+// this by itself: meet.google.com refuses to be framed (X-Frame-Options: SAMEORIGIN).
+//
+// The window runs in its own persistent session (`persist:google-meet`): the Google sign-in is
+// remembered between meetings and never mixes with Ubex Chat's own storage. It presents itself as
+// the Chrome it is, without the "Electron/…" and "ubex-chat/…" tokens, because Google's sign-in
+// refuses browsers it does not recognise. Inside it, Google's own pages (Meet, the account sign-in)
+// stay in the window; anything else goes to the real browser. Camera, microphone, screen sharing
+// and notifications are allowed for meet.google.com only.
+const MEET_PARTITION = 'persist:google-meet';
+const MEET_LINK = /^https:\/\/meet\.google\.com\/[a-z]{3}-[a-z]{4}-[a-z]{3}(?:[?#].*)?$/i;
+
+function isGoogleMeetUrl(url) {
+  return typeof url === 'string' && MEET_LINK.test(url);
+}
+
+// Google's own pages the Meet window may move between: Meet itself and the account sign-in, which
+// passes through accounts.youtube.com and the country domains (accounts.google.es) to set cookies.
+function isGooglePage(url) {
+  try {
+    const u = new URL(url);
+    if (u.protocol !== 'https:') return false;
+    const h = u.hostname.toLowerCase();
+    return (
+      h === 'google.com' ||
+      h.endsWith('.google.com') ||
+      /^accounts\.google\.[a-z.]{2,6}$/.test(h) ||
+      h === 'accounts.youtube.com' ||
+      h.endsWith('.googleusercontent.com') ||
+      h.endsWith('.gstatic.com')
+    );
+  } catch (e) {
+    return false;
+  }
+}
+
+function isMeetOrigin(url) {
+  try {
+    return new URL(url).hostname.toLowerCase() === 'meet.google.com';
   } catch (e) {
     return false;
   }
@@ -137,6 +183,10 @@ if (!app.requestSingleInstanceLock()) {
   // everything else goes to the person's browser.
   function wireContents(contents) {
     contents.setWindowOpenHandler(({ url }) => {
+      if (isGoogleMeetUrl(url)) {
+        openMeetWindow(url);
+        return { action: 'deny' };
+      }
       if (isAppUrl(url)) {
         return {
           action: 'allow',
@@ -149,7 +199,8 @@ if (!app.requestSingleInstanceLock()) {
     contents.on('will-navigate', (event, url) => {
       if (isAppUrl(url)) return;
       event.preventDefault();
-      if (/^(https?|mailto|tel):/i.test(url)) shell.openExternal(url);
+      if (isGoogleMeetUrl(url)) openMeetWindow(url);
+      else if (/^(https?|mailto|tel):/i.test(url)) shell.openExternal(url);
     });
     contents.on('context-menu', (_event, params) => showContextMenu(contents, params));
     // Zoom (see above). Chromium resets it on some navigations, so it is set again on each load.
@@ -238,6 +289,100 @@ if (!app.requestSingleInstanceLock()) {
     ses.setPermissionCheckHandler((contents, permission, origin) => {
       return ALLOWED_PERMISSIONS.has(permission) && isAppUrl(origin || (contents && contents.getURL()) || '');
     });
+    handleScreenShare(ses);
+  }
+
+  // The Google Meet session: made once, the first time a Meet is opened.
+  let meetSes = null;
+  function meetSession() {
+    if (meetSes) return meetSes;
+    meetSes = session.fromPartition(MEET_PARTITION);
+    meetSes.setUserAgent(chromeUserAgent());
+    meetSes.setPermissionRequestHandler((contents, permission, callback) => {
+      callback(ALLOWED_PERMISSIONS.has(permission) && isMeetOrigin(contents.getURL()));
+    });
+    meetSes.setPermissionCheckHandler((contents, permission, origin) => {
+      return ALLOWED_PERMISSIONS.has(permission) && isMeetOrigin(origin || (contents && contents.getURL()) || '');
+    });
+    handleScreenShare(meetSes);
+    return meetSes;
+  }
+
+  // Electron's own user agent minus the tokens that make Google's sign-in refuse it.
+  function chromeUserAgent() {
+    return app.userAgentFallback.replace(/\s+(Electron|ubex-chat|Ubex Chat)\/\S+/gi, '');
+  }
+
+  // One window per meeting: opening a Meet that is already open brings its window forward;
+  // another meeting gets a window of its own rather than replacing a call in progress.
+  const meetWindows = new Map(); // meeting code -> BrowserWindow
+
+  function meetCode(url) {
+    const m = /meet\.google\.com\/([a-z]{3}-[a-z]{4}-[a-z]{3})/i.exec(url || '');
+    return m ? m[1].toLowerCase() : '';
+  }
+
+  function openMeetWindow(url) {
+    if (!isGoogleMeetUrl(url)) return;
+    const code = meetCode(url);
+    const open = meetWindows.get(code);
+    if (open && !open.isDestroyed()) {
+      raise(open);
+      return;
+    }
+    const win = new BrowserWindow({
+      width: 1280,
+      height: 820,
+      minWidth: 720,
+      minHeight: 480,
+      show: false,
+      title: 'Google Meet',
+      autoHideMenuBar: true,
+      backgroundColor: '#202124',
+      icon: path.join(__dirname, 'build/icon.png'),
+      webPreferences: {
+        session: meetSession(),
+        contextIsolation: true,
+        sandbox: true,
+        spellcheck: true,
+        autoplayPolicy: 'no-user-gesture-required',
+      },
+    });
+    meetWindows.set(code, win);
+    win.on('closed', () => {
+      if (meetWindows.get(code) === win) meetWindows.delete(code);
+    });
+    win.once('ready-to-show', () => win.show());
+    // The page's own title ("Meet - abc-defg-hij"), not "Electron".
+    win.webContents.on('page-title-updated', (event, title) => {
+      event.preventDefault();
+      win.setTitle(title && title !== 'Meet' ? title : 'Google Meet');
+    });
+    const contents = win.webContents;
+    contents.setWindowOpenHandler(({ url: next }) => {
+      if (isGoogleMeetUrl(next)) openMeetWindow(next);
+      else if (/^(https?|mailto|tel):/i.test(next)) shell.openExternal(next);
+      return { action: 'deny' };
+    });
+    contents.on('will-navigate', (event, next) => {
+      if (isGooglePage(next)) return;
+      event.preventDefault();
+      if (/^(https?|mailto|tel):/i.test(next)) shell.openExternal(next);
+    });
+    contents.on('context-menu', (_event, params) => {
+      const items = [];
+      if (params.isEditable) items.push({ role: 'cut' }, { role: 'copy' }, { role: 'paste' });
+      else if (params.selectionText) items.push({ role: 'copy' });
+      if (items.length) items.push({ type: 'separator' });
+      // A way out when Google refuses something in here: the same meeting in the real browser.
+      items.push({ label: 'Open this meeting in your browser', click: () => shell.openExternal('https://meet.google.com/' + code) });
+      Menu.buildFromTemplate(items).popup();
+    });
+    contents.on('did-finish-load', () => applyZoom(contents));
+    win.loadURL(url);
+  }
+
+  function handleScreenShare(ses) {
     ses.setDisplayMediaRequestHandler(async (request, callback) => {
       try {
         const sources = await desktopCapturer.getSources({
@@ -385,6 +530,10 @@ if (!app.requestSingleInstanceLock()) {
   }
 
   function setUpNotifications() {
+    // A Google Meet link, from the web app (shared/meet-window.js): its own window (see above).
+    ipcMain.on('ubex:open-meet', (_event, url) => {
+      if (isGoogleMeetUrl(String(url || ''))) openMeetWindow(String(url));
+    });
     ipcMain.on('ubex:focus', (event) => raise(windowOf(event)));
     ipcMain.on('ubex:notify', (event, payload) => {
       const win = windowOf(event);
@@ -409,6 +558,8 @@ if (!app.requestSingleInstanceLock()) {
 
   app.on('web-contents-created', (_event, contents) => {
     // Windows opened by the app (setWindowOpenHandler 'allow') get the same rules.
+    // The Google Meet windows have rules of their own (openMeetWindow) and are left alone.
+    if (meetSes && contents.session === meetSes) return;
     if (contents.getType() === 'window' && mainWindow && contents !== mainWindow.webContents) wireContents(contents);
   });
 

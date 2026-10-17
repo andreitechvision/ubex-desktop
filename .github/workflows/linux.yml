@@ -1,0 +1,59 @@
+# The Linux installers (.rpm, .deb, .AppImage and latest-linux.yml), built on GitHub's Ubuntu.
+#
+# NOT started by a tag: release.sh builds them on the release machine (Fedora) and uploads them
+# itself, and this would replace those files. Run it by hand for a release made from a machine with
+# no Linux (Windows, no WSL): Actions → Linux installers → Run workflow → the tag. Like the Windows
+# workflow it adds the files to that version's release, draft or published.
+name: Linux installers
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to build, e.g. v1.4.0
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ inputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # rpmbuild for the .rpm; electron-builder brings fpm for the .deb.
+      - run: sudo apt-get update && sudo apt-get install -y rpm
+
+      - run: npm ci
+
+      - run: npx electron-builder --linux --publish never
+
+      - name: Check the build matches the release
+        run: |
+          for f in dist/Ubex-Chat-x86_64.rpm dist/Ubex-Chat-amd64.deb dist/Ubex-Chat-x86_64.AppImage dist/latest-linux.yml; do
+            test -s "$f" || { echo "missing $f"; exit 1; }
+          done
+          grep -q "^version: ${TAG#v}$" dist/latest-linux.yml || { echo "dist/latest-linux.yml is not ${TAG#v}"; cat dist/latest-linux.yml; exit 1; }
+
+      - name: Add to the release
+        run: |
+          for i in $(seq 1 60); do
+            gh release view "$TAG" >/dev/null 2>&1 && break
+            sleep 10
+          done
+          gh release upload "$TAG" --clobber \
+            dist/Ubex-Chat-x86_64.rpm \
+            dist/Ubex-Chat-amd64.deb \
+            dist/Ubex-Chat-x86_64.AppImage \
+            dist/latest-linux.yml
