@@ -103,8 +103,21 @@ if [ -z "$RUN" ]; then
   echo "  gh release edit v$VERSION -R $REPO --draft=false --latest   and deploy $IFACE_FILE" >&2
   exit 1
 fi
-if ! gh run watch "$RUN" -R "$REPO" --exit-status --interval 30 >/dev/null; then
-  echo "The Windows build failed: https://github.com/$REPO/actions/runs/$RUN" >&2
+# Done when the installer is on the release, or the run says so. GitHub's run status can lag far behind
+# (2026-10-19: the build finished in minutes, the run read "in progress" for over an hour), so the
+# release's own files are checked too. Up to 3 hours.
+WIN_OK=""
+for i in $(seq 1 360); do
+  if gh release view "v$VERSION" -R "$REPO" --json assets --jq '.assets[].name' 2>/dev/null | grep -qx 'latest.yml'; then
+    WIN_OK=yes; break
+  fi
+  CONCLUSION="$(gh run view "$RUN" -R "$REPO" --json status,conclusion --jq 'select(.status=="completed") | .conclusion' 2>/dev/null || true)"
+  if [ "$CONCLUSION" = "success" ]; then WIN_OK=yes; break; fi
+  if [ -n "$CONCLUSION" ]; then break; fi
+  sleep 30
+done
+if [ -z "$WIN_OK" ]; then
+  echo "The Windows build failed or did not finish: https://github.com/$REPO/actions/runs/$RUN" >&2
   echo "The release is still a draft. Re-run the build there, then:" >&2
   echo "  gh release edit v$VERSION -R $REPO --draft=false --latest   and deploy $IFACE_FILE" >&2
   exit 1

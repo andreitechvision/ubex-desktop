@@ -8,7 +8,7 @@
 // a notification is clicked, updates of the shell, Google Meet in a window of its own, and (1.5.2) a record
 // of the window hanging and of its page or GPU process crashing, which the web app sends to Debug.
 
-const { app, BrowserWindow, Menu, Notification, desktopCapturer, dialog, ipcMain, nativeImage, nativeTheme, net, session, shell } = require('electron');
+const { app, BrowserWindow, Menu, Notification, desktopCapturer, dialog, ipcMain, powerMonitor, nativeImage, nativeTheme, net, session, shell } = require('electron');
 const fs = require('fs');
 const path = require('path');
 
@@ -252,6 +252,8 @@ if (!app.requestSingleInstanceLock()) {
 
   function wireHealth(win) {
     const contents = win.webContents;
+    // Windows: logging off or shutting down ends the session without a quit.
+    win.on('session-end', () => recordExit('shutdown'));
     let hungAt = 0;
     let asking = false;
     let askTimer = null;
@@ -296,7 +298,28 @@ if (!app.requestSingleInstanceLock()) {
     });
   }
 
+  // (1.5.3) How the app last ended on purpose: quit, or the computer shutting down / logging out. The web app
+  // asks (ubexDesktop.lastExit) so a session that ended that way is not reported as "closed unexpectedly"
+  // (SUPPORT-SECURITY-AUDIT.md L6).
+  const exitFile = () => path.join(app.getPath('userData'), 'last-exit.json');
+  function recordExit(why) {
+    try {
+      fs.writeFileSync(exitFile(), JSON.stringify({ at: Date.now(), why }));
+    } catch (e) {}
+  }
+
   function setUpHealth() {
+    app.on('before-quit', () => recordExit('quit'));
+    try {
+      powerMonitor.on('shutdown', () => recordExit('shutdown'));
+    } catch (e) {}
+    ipcMain.handle('ubex:last-exit', () => {
+      try {
+        return JSON.parse(fs.readFileSync(exitFile(), 'utf8'));
+      } catch (e) {
+        return null;
+      }
+    });
     app.on('child-process-gone', (_event, details) => {
       if (!details || details.reason === 'clean-exit') return;
       const what = details.type === 'GPU' ? 'The GPU process crashed' : `A ${details.name || details.type} process crashed`;
