@@ -6,7 +6,8 @@
 // permission prompts (mic, camera, notifications), a screen-share picker, opening outside
 // links in the real browser, a right-click menu in text fields, zoom, raising the window when
 // a notification is clicked, updates of the shell, Google Meet in a window of its own, and (1.5.2) a record
-// of the window hanging and of its page or GPU process crashing, which the web app sends to Debug.
+// of the window hanging and of its page or GPU process crashing, which the web app sends to Debug. (1.5.4) How
+// it draws (Settings → Desktop app → Graphics), and updates on Linux installed without freezing the window.
 
 const { app, BrowserWindow, Menu, Notification, desktopCapturer, dialog, ipcMain, powerMonitor, nativeImage, nativeTheme, net, session, shell } = require('electron');
 const fs = require('fs');
@@ -89,7 +90,44 @@ function appUrlFromArgs(argv) {
   return APP_URL + '/' + rest;
 }
 
-if (!app.requestSingleInstanceLock()) {
+// ── Graphics (1.5.4) ─────────────────────────────────────────────────────────────────
+// How the app draws, chosen in Settings → Desktop app → Graphics and kept in userData/settings.json:
+//   auto      Electron's own choice: the GPU, and on Linux a native Wayland window under Wayland
+//   x11       the GPU, in an X11 window (XWayland) — the usual cure when a Wayland session with the
+//             NVIDIA driver freezes the window or a call's video
+//   software  no GPU at all: everything drawn by the processor. Always works, uses more CPU in calls
+// Read before the app is ready, because both have to be decided before the first window. The X11 window
+// needs a command-line switch, so the app starts itself again with it.
+const GRAPHICS_MODES = ['auto', 'x11', 'software'];
+const X11_SWITCH = '--ozone-platform=x11';
+
+function savedGraphics() {
+  try {
+    const s = JSON.parse(fs.readFileSync(path.join(app.getPath('userData'), 'settings.json'), 'utf8')) || {};
+    return GRAPHICS_MODES.includes(s.graphics) ? s.graphics : 'auto';
+  } catch (e) {
+    return 'auto';
+  }
+}
+
+// Start again: after an update, or to draw another way. An AppImage is started from its file, not from the
+// folder it mounted (which goes away when this process ends).
+function relaunch(extraArgs) {
+  const args = process.argv.slice(1).filter((a) => !a.startsWith('ubex-chat://') && a !== X11_SWITCH);
+  const opts = { args: [...args, ...(extraArgs || [])] };
+  if (process.env.APPIMAGE) opts.execPath = process.env.APPIMAGE;
+  app.relaunch(opts);
+  app.exit(0);
+}
+
+const GRAPHICS = savedGraphics();
+const onWayland = process.platform === 'linux' && /wayland/i.test(process.env.XDG_SESSION_TYPE || '');
+if (GRAPHICS === 'software') app.disableHardwareAcceleration();
+const needsX11 = GRAPHICS === 'x11' && onWayland && !process.argv.includes(X11_SWITCH);
+
+if (needsX11) {
+  relaunch([X11_SWITCH]);
+} else if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
   let mainWindow = null;
@@ -229,6 +267,8 @@ if (!app.requestSingleInstanceLock()) {
       const g = app.getGPUFeatureStatus();
       lines.push(`GPU: compositing ${g.gpu_compositing}, video decode ${g.video_decode}, webgl ${g.webgl}`);
     } catch (e) {}
+    if (gpuName) lines.push(`Graphics card: ${gpuName}`);
+    lines.push(`Graphics: ${GRAPHICS}${GRAPHICS === 'x11' || process.argv.includes(X11_SWITCH) ? ' (X11 window)' : ''}, session ${process.env.XDG_SESSION_TYPE || process.platform}`);
     lines.push(`System: ${process.platform} ${process.getSystemVersion ? process.getSystemVersion() : ''}, ${Math.round(require('os').totalmem() / 1073741824)} GB RAM, ${Math.round(require('os').freemem() / 1048576)} MB free`);
     lines.push(`Desktop app ${app.getVersion()}, Electron ${process.versions.electron}, Chrome ${process.versions.chrome}`);
     return lines;
@@ -240,6 +280,19 @@ if (!app.requestSingleInstanceLock()) {
     } catch (e) {
       return '';
     }
+  }
+
+  // The renderer and driver Chromium actually draws with ("NVIDIA GeForce RTX 4090/PCIe/SSE2", or "llvmpipe" /
+  // "NV194" when the NVIDIA driver is not the one in use), read once the GPU process has started.
+  let gpuName = '';
+  function readGpu() {
+    return app.getGPUInfo('complete').then((info) => {
+      const aux = (info && info.auxAttributes) || {};
+      const dev = ((info && info.gpuDevice) || []).find((d) => d.active) || ((info && info.gpuDevice) || [])[0] || {};
+      const driver = [dev.driverVendor, dev.driverVersion].filter(Boolean).join(' ');
+      gpuName = [aux.glRenderer || '', driver ? `driver ${driver}` : ''].filter(Boolean).join(', ').slice(0, 200);
+      return gpuName;
+    }).catch(() => gpuName);
   }
 
   function recordHealth(title, details, extra) {
@@ -298,6 +351,64 @@ if (!app.requestSingleInstanceLock()) {
     });
   }
 
+  // The GPU process failing again and again is the graphics driver (it is what freezes the window or a call's
+  // video). The second time within half an hour, the app offers to stop using the GPU — once per run, and only
+  // while it still is.
+  const gpuFails = [];
+  let gpuAsked = false;
+  async function gpuFailed() {
+    const now = Date.now();
+    gpuFails.push(now);
+    while (gpuFails.length && now - gpuFails[0] > 30 * 60 * 1000) gpuFails.shift();
+    if (gpuFails.length < 2 || gpuAsked || GRAPHICS === 'software' || !mainWindow || mainWindow.isDestroyed()) return;
+    gpuAsked = true;
+    const { response } = await dialog.showMessageBox(mainWindow, {
+      type: 'warning',
+      title: 'Graphics problem',
+      message: 'Ubex Chat\u2019s graphics keep failing on this computer',
+      detail:
+        'This usually comes from the graphics driver, and it can freeze the window or the video in calls. Ubex Chat can stop using the graphics card and draw everything itself instead. It restarts to do that; a call you are in reconnects.\n\nYou can change this later in Settings \u2192 Desktop app \u2192 Graphics.',
+      buttons: ['Not now', 'Turn off and restart'],
+      defaultId: 1,
+      cancelId: 0,
+    });
+    if (response !== 1) return;
+    writeSettings({ graphics: 'software' });
+    recordExit('quit');
+    relaunch();
+  }
+
+  // Settings → Desktop app → Graphics: what is in use now, what is saved for the next start, and a restart.
+  function setUpGraphics() {
+    const fromApp = (event) => !!(event.senderFrame && isAppUrl(event.senderFrame.url));
+    ipcMain.handle('ubex:graphics', async (event) => {
+      if (!fromApp(event)) return null;
+      await readGpu();
+      let accelerated = GRAPHICS !== 'software';
+      try {
+        accelerated = String(app.getGPUFeatureStatus().gpu_compositing || '').indexOf('enabled') === 0;
+      } catch (e) {}
+      return {
+        mode: GRAPHICS,
+        saved: savedGraphics(),
+        renderer: gpuName,
+        session: process.env.XDG_SESSION_TYPE || '',
+        x11: process.argv.includes(X11_SWITCH) || (process.platform === 'linux' && !onWayland),
+        accelerated,
+      };
+    });
+    ipcMain.handle('ubex:graphics-set', (event, mode) => {
+      if (!fromApp(event) || !GRAPHICS_MODES.includes(mode)) return false;
+      writeSettings({ graphics: mode });
+      return true;
+    });
+    ipcMain.on('ubex:restart', (event) => {
+      if (!fromApp(event)) return;
+      recordExit('quit');
+      relaunch();
+    });
+  }
+
   // (1.5.3) How the app last ended on purpose: quit, or the computer shutting down / logging out. The web app
   // asks (ubexDesktop.lastExit) so a session that ended that way is not reported as "closed unexpectedly"
   // (SUPPORT-SECURITY-AUDIT.md L6).
@@ -325,6 +436,7 @@ if (!app.requestSingleInstanceLock()) {
       const what = details.type === 'GPU' ? 'The GPU process crashed' : `A ${details.name || details.type} process crashed`;
       recordHealth(`${what} (${details.reason})`, [`Type ${details.type}${details.serviceName ? `, ${details.serviceName}` : ''}, exit code ${details.exitCode}`],
         { page: mainWindow ? pageOf(mainWindow.webContents) : '' });
+      if (details.type === 'GPU') gpuFailed();
     });
     // What has not been sent yet; the web app sends them and they are marked.
     ipcMain.handle('ubex:health-events', () => {
@@ -622,10 +734,69 @@ if (!app.requestSingleInstanceLock()) {
     });
   }
 
+  // (1.5.4) Installing an .rpm or .deb update. electron-updater does it with a blocking spawnSync of
+  // `pkexec dnf install …` while the window is still open, so the whole app froze until the password was
+  // typed and dnf had finished (dnf refreshes its package lists first, often a minute) — and looked hung
+  // for good when the password window opened behind it. Here the same install runs in the background: the
+  // window keeps working, the banner says it is installing, and the app restarts itself when it is done.
+  // Cancelling the password leaves the app running with the update still ready.
+  let downloadedFile = '';
+
+  function packageType() {
+    try {
+      return fs.readFileSync(path.join(process.resourcesPath, 'package-type'), 'utf8').trim();
+    } catch (e) {
+      return '';
+    }
+  }
+
+  function hasCommand(cmd) {
+    try {
+      require('child_process').execFileSync('/bin/sh', ['-c', `command -v ${cmd}`], { stdio: 'ignore' });
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function installLinuxPackage() {
+    if (process.platform !== 'linux' || process.env.APPIMAGE || !downloadedFile || !fs.existsSync(downloadedFile)) return false;
+    const type = packageType();
+    if ((type !== 'rpm' && type !== 'deb') || !hasCommand('pkexec')) return false;
+    const file = `'${downloadedFile.replace(/'/g, `'\\''`)}'`;
+    const script =
+      type === 'rpm'
+        ? hasCommand('dnf')
+          ? `dnf install --nogpgcheck -y ${file}`
+          : `rpm -Uvh --replacepkgs ${file}`
+        : `dpkg -i ${file} || apt-get install -f -y`;
+    setUpdateState({ state: 'installing', failed: '' });
+    let child;
+    try {
+      child = require('child_process').spawn('pkexec', ['/bin/sh', '-c', script], { stdio: 'ignore' });
+    } catch (e) {
+      setUpdateState({ state: 'ready', failed: 'error' });
+      return true;
+    }
+    child.on('error', () => setUpdateState({ state: 'ready', failed: 'error' }));
+    child.on('exit', (code) => {
+      if (code === 0) {
+        recordExit('quit');
+        relaunch();
+        return;
+      }
+      // pkexec: 126 the password window was closed, 127 not authorised.
+      setUpdateState({ state: 'ready', failed: code === 126 || code === 127 ? 'cancelled' : 'error' });
+    });
+    return true;
+  }
+
   function setUpUpdates() {
     ipcMain.handle('ubex:update-state', () => updateState);
     ipcMain.on('ubex:update-install', () => {
-      if (updater && updateState.state === 'ready') updater.quitAndInstall(false, true);
+      if (!updater || updateState.state !== 'ready') return;
+      if (installLinuxPackage()) return;
+      updater.quitAndInstall(false, true);
     });
     if (!app.isPackaged) return;
     try {
@@ -638,7 +809,10 @@ if (!app.requestSingleInstanceLock()) {
     updater.autoInstallOnAppQuit = !!packaged;
     updater.on('update-available', (info) => setUpdateState({ state: 'downloading', version: info.version, percent: 0 }));
     updater.on('download-progress', (p) => setUpdateState({ state: 'downloading', percent: Math.round(p.percent || 0) }));
-    updater.on('update-downloaded', (info) => setUpdateState({ state: 'ready', version: info.version, percent: 100 }));
+    updater.on('update-downloaded', (info) => {
+      downloadedFile = (info && info.downloadedFile) || '';
+      setUpdateState({ state: 'ready', version: info.version, percent: 100, failed: '' });
+    });
     updater.on('error', () => {
       if (updateState.state !== 'ready') setUpdateState({ state: 'error' });
     });
@@ -782,6 +956,9 @@ if (!app.requestSingleInstanceLock()) {
     setUpSession();
     setUpNotifications();
     setUpHealth();
+    setUpGraphics();
+    // Once the GPU process is up, so the first health report already names the card and driver.
+    setTimeout(readGpu, 5000);
     mainWindow = createWindow(appUrlFromArgs(process.argv));
     mainWindow.on('closed', () => {
       mainWindow = null;

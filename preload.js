@@ -10,7 +10,8 @@ const versionArg = process.argv.find((a) => a.startsWith('--ubex-version='));
 contextBridge.exposeInMainWorld('ubexDesktop', {
   platform: process.platform,
   version: versionArg ? versionArg.slice('--ubex-version='.length) : '',
-  // { state: 'idle' | 'downloading' | 'ready' | 'error', version, percent }
+  // { state: 'idle' | 'downloading' | 'ready' | 'installing' | 'error', version, percent, failed }. `installing` and
+  // `failed` ('cancelled' | 'error': the last install did not go through) are 1.5.4 on, Linux .rpm / .deb.
   getUpdate: () => ipcRenderer.invoke('ubex:update-state'),
   onUpdate: (callback) => {
     const listener = (_event, state) => callback(state);
@@ -49,6 +50,11 @@ contextBridge.exposeInMainWorld('ubexDesktop', {
   healthEvents: () => ipcRenderer.invoke('ubex:health-events'),
   // (1.5.3 on) How the app last ended on purpose: {at, why: 'quit' | 'shutdown'} or null.
   lastExit: () => ipcRenderer.invoke('ubex:last-exit'),
+  // (1.5.4 on) How the app draws (Settings → Desktop app → Graphics): {mode, saved, renderer, session, x11,
+  // accelerated}. `mode` is the one in use, `saved` the one the next start uses ('auto' | 'x11' | 'software').
+  graphics: () => ipcRenderer.invoke('ubex:graphics'),
+  setGraphics: (mode) => ipcRenderer.invoke('ubex:graphics-set', String(mode || '')),
+  restart: () => ipcRenderer.send('ubex:restart'),
   // The zoom level in percent, each time Ctrl + / - / 0 or Ctrl + wheel changes it (1.2.0 on).
   onZoom: (callback) => {
     const listener = (_event, percent) => callback(percent);
