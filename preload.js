@@ -44,6 +44,9 @@ contextBridge.exposeInMainWorld('ubexDesktop', {
     ipcRenderer.on('ubex:notification-click', listener);
     return () => ipcRenderer.removeListener('ubex:notification-click', listener);
   },
+  // (1.5.2 on) The window hanging, its page or the GPU crashing, recorded by the desktop app since the last
+  // ask: [{at, title, details[], page, duration}]. The web app sends them to Debug (shared/app-health.js).
+  healthEvents: () => ipcRenderer.invoke('ubex:health-events'),
   // The zoom level in percent, each time Ctrl + / - / 0 or Ctrl + wheel changes it (1.2.0 on).
   onZoom: (callback) => {
     const listener = (_event, percent) => callback(percent);

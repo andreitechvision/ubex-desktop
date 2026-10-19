@@ -5,9 +5,10 @@
 // step. This file only adds what a browser tab gives for free and Electron does not: the
 // permission prompts (mic, camera, notifications), a screen-share picker, opening outside
 // links in the real browser, a right-click menu in text fields, zoom, raising the window when
-// a notification is clicked, updates of the shell, and Google Meet in a window of its own.
+// a notification is clicked, updates of the shell, Google Meet in a window of its own, and (1.5.2) a record
+// of the window hanging and of its page or GPU process crashing, which the web app sends to Debug.
 
-const { app, BrowserWindow, Menu, Notification, desktopCapturer, ipcMain, nativeImage, nativeTheme, net, session, shell } = require('electron');
+const { app, BrowserWindow, Menu, Notification, desktopCapturer, dialog, ipcMain, nativeImage, nativeTheme, net, session, shell } = require('electron');
 const fs = require('fs');
 const path = require('path');
 
@@ -186,8 +187,133 @@ if (!app.requestSingleInstanceLock()) {
     // The taskbar highlight asked for by a notification (ubex:attention) ends when you look.
     win.on('focus', () => win.flashFrame(false));
     wireContents(win.webContents);
+    wireHealth(win);
     win.loadURL(startUrl || APP_URL);
     return win;
+  }
+
+  // ── Health (1.5.2) ───────────────────────────────────────────────────────────────────
+  // What the web page cannot report itself, because it is the thing that is stuck or gone: the window not
+  // responding (and for how long), its page crashing, the GPU or a media process crashing (video freezes in
+  // calls). Kept in userData/health.json until the web app asks for them (ubexDesktop.healthEvents, read by
+  // its shared/app-health.js and sent to the admin panel's Debug). A hung window offers Wait / Reload after
+  // HANG_ASK_MS instead of leaving the person to kill the app; a crashed page is loaded again.
+  const HANG_ASK_MS = 10000;
+  const healthFile = () => path.join(app.getPath('userData'), 'health.json');
+
+  function readHealth() {
+    try {
+      const list = JSON.parse(fs.readFileSync(healthFile(), 'utf8'));
+      return Array.isArray(list) ? list : [];
+    } catch (e) {
+      return [];
+    }
+  }
+
+  function metricsLines() {
+    const lines = [];
+    try {
+      const byType = {};
+      app.getAppMetrics().forEach((m) => {
+        const t = byType[m.type] || (byType[m.type] = { mem: 0, cpu: 0, n: 0 });
+        t.mem += (m.memory && m.memory.workingSetSize) || 0;
+        t.cpu += (m.cpu && m.cpu.percentCPUUsage) || 0;
+        t.n += 1;
+      });
+      Object.keys(byType).forEach((k) => {
+        const t = byType[k];
+        lines.push(`${k}${t.n > 1 ? ` x${t.n}` : ''}: ${Math.round(t.mem / 1024)} MB, CPU ${Math.round(t.cpu)}%`);
+      });
+    } catch (e) {}
+    try {
+      const g = app.getGPUFeatureStatus();
+      lines.push(`GPU: compositing ${g.gpu_compositing}, video decode ${g.video_decode}, webgl ${g.webgl}`);
+    } catch (e) {}
+    lines.push(`System: ${process.platform} ${process.getSystemVersion ? process.getSystemVersion() : ''}, ${Math.round(require('os').totalmem() / 1073741824)} GB RAM, ${Math.round(require('os').freemem() / 1048576)} MB free`);
+    lines.push(`Desktop app ${app.getVersion()}, Electron ${process.versions.electron}, Chrome ${process.versions.chrome}`);
+    return lines;
+  }
+
+  function pageOf(contents) {
+    try {
+      return contents && !contents.isDestroyed() ? new URL(contents.getURL()).pathname : '';
+    } catch (e) {
+      return '';
+    }
+  }
+
+  function recordHealth(title, details, extra) {
+    const list = readHealth().slice(-49);
+    list.push({ at: new Date().toISOString(), title, details: [...(details || []), ...metricsLines()], ...(extra || {}), reported: false });
+    try {
+      fs.writeFileSync(healthFile(), JSON.stringify(list));
+    } catch (e) {}
+  }
+
+  function wireHealth(win) {
+    const contents = win.webContents;
+    let hungAt = 0;
+    let asking = false;
+    let askTimer = null;
+    win.on('unresponsive', () => {
+      if (!hungAt) hungAt = Date.now();
+      clearTimeout(askTimer);
+      askTimer = setTimeout(async () => {
+        if (!hungAt || asking || win.isDestroyed()) return;
+        asking = true;
+        const { response } = await dialog.showMessageBox(win, {
+          type: 'warning',
+          title: 'Ubex Chat is not responding',
+          message: 'Ubex Chat is not responding',
+          detail: 'You can wait for it, or reload it. A call you are in will reconnect after a reload.',
+          buttons: ['Wait', 'Reload'],
+          defaultId: 0,
+          cancelId: 0,
+        });
+        asking = false;
+        if (response === 1 && !win.isDestroyed()) {
+          recordHealth('The window stopped responding and was reloaded', [`Not responding for ${Math.round((Date.now() - hungAt) / 1000)} s before Reload`],
+            { page: pageOf(contents), duration: Date.now() - hungAt });
+          hungAt = 0;
+          try { contents.forcefullyCrashRenderer(); } catch (e) {}
+          contents.reload();
+        }
+      }, HANG_ASK_MS);
+    });
+    win.on('responsive', () => {
+      clearTimeout(askTimer);
+      if (!hungAt) return;
+      const took = Date.now() - hungAt;
+      hungAt = 0;
+      recordHealth('The window stopped responding', [`Not responding for ${(took / 1000).toFixed(1)} s, then recovered`], { page: pageOf(contents), duration: took });
+    });
+    contents.on('render-process-gone', (_event, details) => {
+      if (!details || details.reason === 'clean-exit') return;
+      recordHealth(`The page crashed (${details.reason})`, [`Exit code ${details.exitCode}`], { page: pageOf(contents) });
+      setTimeout(() => {
+        if (!win.isDestroyed()) contents.reload();
+      }, 1000);
+    });
+  }
+
+  function setUpHealth() {
+    app.on('child-process-gone', (_event, details) => {
+      if (!details || details.reason === 'clean-exit') return;
+      const what = details.type === 'GPU' ? 'The GPU process crashed' : `A ${details.name || details.type} process crashed`;
+      recordHealth(`${what} (${details.reason})`, [`Type ${details.type}${details.serviceName ? `, ${details.serviceName}` : ''}, exit code ${details.exitCode}`],
+        { page: mainWindow ? pageOf(mainWindow.webContents) : '' });
+    });
+    // What has not been sent yet; the web app sends them and they are marked.
+    ipcMain.handle('ubex:health-events', () => {
+      const list = readHealth();
+      const fresh = list.filter((e) => !e.reported);
+      if (fresh.length) {
+        try {
+          fs.writeFileSync(healthFile(), JSON.stringify(list.map((e) => ({ ...e, reported: true })).slice(-50)));
+        } catch (e) {}
+      }
+      return fresh.map(({ reported, ...e }) => e);
+    });
   }
 
   // Ubex Chat links stay in the app (a meeting or board opened in a new tab gets its own window);
@@ -632,6 +758,7 @@ if (!app.requestSingleInstanceLock()) {
   app.whenReady().then(() => {
     setUpSession();
     setUpNotifications();
+    setUpHealth();
     mainWindow = createWindow(appUrlFromArgs(process.argv));
     mainWindow.on('closed', () => {
       mainWindow = null;
