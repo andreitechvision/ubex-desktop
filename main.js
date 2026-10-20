@@ -285,14 +285,32 @@ if (needsX11) {
   // The renderer and driver Chromium actually draws with ("NVIDIA GeForce RTX 4090/PCIe/SSE2", or "llvmpipe" /
   // "NV194" when the NVIDIA driver is not the one in use), read once the GPU process has started.
   let gpuName = '';
+  // Under Wayland 'complete' can come back without the renderer (Debug, 2026-10-20: a hang report with no
+  // card at all), so then the basic info names the card by vendor, and Linux says which NVIDIA driver runs.
+  const VENDORS = { 4318: 'NVIDIA', 4098: 'AMD', 32902: 'Intel' };
+  function nvidiaDriver() {
+    try {
+      const m = fs.readFileSync('/proc/driver/nvidia/version', 'utf8').match(/Kernel Module\s+(?:for \S+\s+)?([\d.]+)/);
+      return m ? `NVIDIA proprietary driver ${m[1]}` : 'NVIDIA proprietary driver';
+    } catch (e) {
+      return '';
+    }
+  }
+  function nameOf(info) {
+    const aux = (info && info.auxAttributes) || {};
+    const dev = ((info && info.gpuDevice) || []).find((d) => d.active) || ((info && info.gpuDevice) || [])[0] || {};
+    const driver = [dev.driverVendor, dev.driverVersion].filter(Boolean).join(' ');
+    const card = aux.glRenderer || (VENDORS[dev.vendorId] ? `${VENDORS[dev.vendorId]} card` : '');
+    return [card, driver ? `driver ${driver}` : ''].filter(Boolean).join(', ');
+  }
   function readGpu() {
-    return app.getGPUInfo('complete').then((info) => {
-      const aux = (info && info.auxAttributes) || {};
-      const dev = ((info && info.gpuDevice) || []).find((d) => d.active) || ((info && info.gpuDevice) || [])[0] || {};
-      const driver = [dev.driverVendor, dev.driverVersion].filter(Boolean).join(' ');
-      gpuName = [aux.glRenderer || '', driver ? `driver ${driver}` : ''].filter(Boolean).join(', ').slice(0, 200);
-      return gpuName;
-    }).catch(() => gpuName);
+    return app.getGPUInfo('complete').then(nameOf).catch(() => '')
+      .then((name) => name || app.getGPUInfo('basic').then(nameOf).catch(() => ''))
+      .then((name) => {
+        const nv = process.platform === 'linux' ? nvidiaDriver() : '';
+        gpuName = [name, nv && name.indexOf(nv) === -1 ? nv : ''].filter(Boolean).join('; ').slice(0, 200);
+        return gpuName;
+      });
   }
 
   function recordHealth(title, details, extra) {
