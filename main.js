@@ -303,8 +303,12 @@ if (needsX11) {
     const card = aux.glRenderer || (VENDORS[dev.vendorId] ? `${VENDORS[dev.vendorId]} card` : '');
     return [card, driver ? `driver ${driver}` : ''].filter(Boolean).join(', ');
   }
+  // Some systems never answer 'complete' (Settings → Graphics waited forever): give up after 3 s.
+  function withinSeconds(promise, s) {
+    return Promise.race([promise, new Promise((resolve) => setTimeout(() => resolve(''), s * 1000))]);
+  }
   function readGpu() {
-    return app.getGPUInfo('complete').then(nameOf).catch(() => '')
+    return withinSeconds(app.getGPUInfo('complete').then(nameOf).catch(() => ''), 3)
       .then((name) => name || app.getGPUInfo('basic').then(nameOf).catch(() => ''))
       .then((name) => {
         const nv = process.platform === 'linux' ? nvidiaDriver() : '';
