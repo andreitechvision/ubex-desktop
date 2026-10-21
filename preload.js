@@ -40,6 +40,8 @@ contextBridge.exposeInMainWorld('ubexDesktop', {
   // bring the window forward on Wayland. `onNotificationClick` gets the `id` back.
   // `icon` (1.3.3 on): the organization's picture URL, or '' for the app's icon.
   notify: ({ id, title, body, tag, icon }) => ipcRenderer.send('ubex:notify', { id, title, body, tag, icon: typeof icon === 'string' ? icon : '' }),
+  // (1.5.5 on) Close the notification shown with that tag (a call's "Call from X" once the ring stops).
+  closeNotification: (tag) => ipcRenderer.send('ubex:notify-close', String(tag || '')),
   onNotificationClick: (callback) => {
     const listener = (_event, id) => callback(id);
     ipcRenderer.on('ubex:notification-click', listener);

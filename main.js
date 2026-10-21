@@ -944,6 +944,15 @@ if (needsX11) {
       const win = windowOf(event);
       if (win && payload && typeof payload === 'object') showNotification(win, payload);
     });
+    // (1.5.5 on) The page closes one it no longer needs: a call's "Call from X" once the ring stops.
+    ipcMain.on('ubex:notify-close', (event, tag) => {
+      if (!windowOf(event)) return;
+      const note = shown.get(String(tag || ''));
+      if (note) {
+        shown.delete(String(tag));
+        note.close();
+      }
+    });
     // A new message while the window is in the background: highlight it in the taskbar
     // (the urgency hint on Linux, a flashing button on Windows) until it is focused.
     ipcMain.on('ubex:attention', (event) => {
