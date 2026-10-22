@@ -745,7 +745,23 @@ if (needsX11) {
   // Ubex Chat links stay in the app (a meeting or board opened in a new tab gets its own window);
   // everything else goes to the person's browser.
   function wireContents(contents) {
-    contents.setWindowOpenHandler(({ url }) => {
+    contents.setWindowOpenHandler(({ url, frameName }) => {
+      // (1.5.7) The call in a window of its own (the web app's Realtime/CallPopout.js): an empty window of the app's
+      // page that the page draws the call into, kept over other apps. Only this name, only empty.
+      if (frameName === 'ubex-call' && (url === 'about:blank' || url === '') && isAppUrl(contents.getURL())) {
+        return {
+          action: 'allow',
+          overrideBrowserWindowOptions: {
+            title: 'Call · Ubex Chat',
+            alwaysOnTop: true,
+            autoHideMenuBar: true,
+            minWidth: 360,
+            minHeight: 260,
+            backgroundColor: background(),
+            icon: path.join(__dirname, 'build/icon.png'),
+          },
+        };
+      }
       if (isGoogleMeetUrl(url)) {
         meetLink(contents, url);
         return { action: 'deny' };
