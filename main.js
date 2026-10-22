@@ -8,6 +8,8 @@
 // a notification is clicked, updates of the shell, Google Meet in a window of its own, and (1.5.2) a record
 // of the window hanging and of its page or GPU process crashing, which the web app sends to Debug. (1.5.4) How
 // it draws (Settings → Desktop app → Graphics), and updates on Linux installed without freezing the window.
+// (1.5.6) Every record carries a timeline of what the window and its processes did before it, and a run that was
+// killed (a stuck window closed by force) is reported on the next start with how it was at the end.
 
 const { app, BrowserWindow, Menu, Notification, desktopCapturer, dialog, ipcMain, powerMonitor, nativeImage, nativeTheme, net, session, shell } = require('electron');
 const fs = require('fs');
@@ -321,25 +323,234 @@ if (needsX11) {
 
   function recordHealth(title, details, extra) {
     const list = readHealth().slice(-49);
-    list.push({ at: new Date().toISOString(), title, details: [...(details || []), ...metricsLines()], ...(extra || {}), reported: false });
+    list.push({
+      at: new Date().toISOString(),
+      title,
+      details: [...(details || []), ...windowLines(), ...metricsLines(), '', 'What the desktop app saw before it (oldest first):', ...timelineLines(40)],
+      ...(extra || {}),
+      reported: false,
+    });
     try {
       fs.writeFileSync(healthFile(), JSON.stringify(list));
     } catch (e) {}
+  }
+
+  // ── Timeline (1.5.6) ─────────────────────────────────────────────────────────────────
+  // What happened to the window and its processes, kept in memory (the last TIMELINE_MAX) and copied into every
+  // health record, so a report says what led up to it: the window shown, hidden, focused, minimised or full
+  // screen, dialogs and the screen-share picker opening and closing, the computer sleeping and waking, the
+  // page loading, input reaching it, warnings and errors in its console, processes ending. Never content.
+  const TIMELINE_MAX = 120;
+  const timeline = [];
+  const clockOf = (ms) => new Date(ms).toISOString().substring(11, 23);
+  const maskText = (s) => String(s || '').replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '<email>').replace(/\s+/g, ' ').slice(0, 160);
+
+  function note(text) {
+    timeline.push({ at: Date.now(), text: maskText(text) });
+    if (timeline.length > TIMELINE_MAX) timeline.shift();
+  }
+
+  function timelineLines(n) {
+    return timeline.slice(-n).map((e) => `${clockOf(e.at)}  ${e.text}`);
+  }
+
+  // What the main window and its page were doing (also written every few seconds to run.json, below).
+  const live = {
+    hungSince: 0, // the window stopped responding (Electron's 'unresponsive'), not yet back
+    dialog: '', // a message box over the window ('hang', 'gpu')
+    picker: false, // the screen-share picker open (modal: the window behind it takes no clicks)
+    sharing: '', // a screen-share request in progress: 'sources' while the system lists them
+    lastMouse: 0,
+    lastKey: 0,
+    inputsWhileHung: 0,
+    pageAnsweredAt: 0, // the page last answered a ping from here (it runs JavaScript)
+    pagePingSince: 0, // a ping is waiting for its answer since then
+    pageSilentNoted: false,
+    asleepAt: 0,
+    gpuStatus: '',
+  };
+
+  function ago(ms) {
+    if (!ms) return 'never';
+    const s = (Date.now() - ms) / 1000;
+    return s < 120 ? `${s.toFixed(1)} s ago` : `${Math.round(s / 60)} min ago`;
+  }
+
+  function windowLines() {
+    const w = mainWindow;
+    if (!w || w.isDestroyed()) return ['Window: none'];
+    const flags = [];
+    try {
+      flags.push(w.isVisible() ? 'visible' : 'hidden');
+      if (w.isFocused()) flags.push('focused');
+      if (w.isMinimized()) flags.push('minimised');
+      if (w.isFullScreen()) flags.push('full screen');
+      if (!w.isEnabled()) flags.push('DISABLED (takes no clicks: a modal window or dialog is over it)');
+      const b = w.getBounds();
+      flags.push(`${b.width}x${b.height}`);
+    } catch (e) {}
+    const lines = [`Window: ${flags.join(', ')}`];
+    if (live.hungSince) lines.push(`Not responding since ${clockOf(live.hungSince)} (${ago(live.hungSince)}), clicks/keys sent to it meanwhile: ${live.inputsWhileHung}`);
+    if (live.dialog) lines.push(`Dialog open over the window: ${live.dialog}`);
+    if (live.picker) lines.push('Screen-share picker open (the window behind it takes no clicks)');
+    if (live.sharing) lines.push(`Screen share request in progress: ${live.sharing}`);
+    lines.push(`Last click reached the window: ${ago(live.lastMouse)}; last key: ${ago(live.lastKey)}`);
+    lines.push(`Page last answered the desktop app: ${ago(live.pageAnsweredAt)}${live.pagePingSince ? `, waiting for an answer since ${ago(live.pagePingSince)}` : ''}`);
+    const others = BrowserWindow.getAllWindows().filter((x) => x !== w && !x.isDestroyed());
+    if (others.length) lines.push(`Other windows: ${others.map((x) => `${x.getTitle() || 'untitled'}${x.isVisible() ? '' : ' (hidden)'}`).join(', ')}`);
+    return lines;
+  }
+
+  // ── This run, every few seconds (1.5.6) ───────────────────────────────────────────────
+  // run.json says how this run was doing a moment ago. When the app is killed (the person closing a stuck window,
+  // the system), nothing runs at the end, so the next start reads what the last one wrote: whether the window
+  // was responding, disabled behind a dialog, receiving clicks, whether the page still answered, and the timeline.
+  // `clean` is written when the app quits on its own.
+  const runFile = () => path.join(app.getPath('userData'), 'run.json');
+  const RUN_EVERY_MS = 5000;
+  const runStarted = Date.now();
+  let lastRunTick = Date.now();
+
+  function writeRun(clean) {
+    try {
+      fs.writeFileSync(runFile(), JSON.stringify({
+        started: runStarted, at: Date.now(), pid: process.pid, version: app.getVersion(), clean: !!clean,
+        window: windowLines(), timeline: timelineLines(60),
+      }));
+    } catch (e) {}
+  }
+
+  function previousRun() {
+    let prev = null;
+    try {
+      prev = JSON.parse(fs.readFileSync(runFile(), 'utf8'));
+    } catch (e) {}
+    if (!prev || prev.clean || !prev.at) return;
+    let ex = null;
+    try {
+      ex = JSON.parse(fs.readFileSync(exitFile(), 'utf8'));
+    } catch (e) {}
+    // Quit, restarted or shut down on purpose just after its last record: not a problem.
+    if (ex && Number(ex.at) >= prev.at - 1000 && Number(ex.at) - prev.at < 30000) return;
+    const list = readHealth().slice(-49);
+    list.push({
+      at: new Date(prev.at).toISOString(),
+      title: 'The desktop app was closed or killed without quitting',
+      details: [
+        `Its last record: ${new Date(prev.at).toISOString().replace('T', ' ').substring(0, 19)} UTC, ${Math.round((prev.at - prev.started) / 60000)} min after it started (version ${prev.version})`,
+        'How it was then (from the desktop app itself, which keeps running when the page or the window is stuck):',
+        ...(prev.window || []),
+        '',
+        'What the desktop app saw before it (oldest first):',
+        ...(prev.timeline || []),
+      ],
+      page: '',
+      reported: false,
+    });
+    try {
+      fs.writeFileSync(healthFile(), JSON.stringify(list));
+    } catch (e) {}
+  }
+
+  // Every RUN_EVERY_MS: run.json, the main process's own stalls (its timers late), and a ping to the page.
+  function watchRun() {
+    previousRun();
+    writeRun(false);
+    app.on('will-quit', () => writeRun(true));
+    setInterval(() => {
+      const now = Date.now();
+      const late = now - lastRunTick - RUN_EVERY_MS;
+      lastRunTick = now;
+      // Not while the computer slept (its timers stop too).
+      if (late > 3000 && late < 10 * 60 * 1000 && !live.asleepAt) {
+        note(`main process blocked for ${(late / 1000).toFixed(1)} s`);
+        recordHealth('The desktop app itself was blocked', [`Its main process did nothing for ${(late / 1000).toFixed(1)} s (the window takes no clicks and draws nothing meanwhile)`]);
+      }
+      pingPage();
+      writeRun(false);
+    }, RUN_EVERY_MS);
+  }
+
+  // Does the page still run JavaScript? A hung page never answers, and that is recorded once.
+  function pingPage() {
+    const w = mainWindow;
+    if (!w || w.isDestroyed() || live.pagePingSince) {
+      if (live.pagePingSince && Date.now() - live.pagePingSince > 15000 && !live.pageSilentNoted) {
+        live.pageSilentNoted = true;
+        note(`page has not answered for ${((Date.now() - live.pagePingSince) / 1000).toFixed(0)} s`);
+      }
+      return;
+    }
+    live.pagePingSince = Date.now();
+    w.webContents
+      .executeJavaScript('1', false)
+      .then(() => {
+        if (live.pageSilentNoted) note(`page answers again after ${((Date.now() - live.pagePingSince) / 1000).toFixed(1)} s`);
+        live.pageSilentNoted = false;
+        live.pageAnsweredAt = Date.now();
+        live.pagePingSince = 0;
+      })
+      .catch(() => {
+        live.pagePingSince = 0;
+      });
   }
 
   function wireHealth(win) {
     const contents = win.webContents;
     // Windows: logging off or shutting down ends the session without a quit.
     win.on('session-end', () => recordExit('shutdown'));
+    ['show', 'hide', 'minimize', 'restore', 'maximize', 'unmaximize', 'enter-full-screen', 'leave-full-screen'].forEach((ev) => win.on(ev, () => note(`window ${ev}`)));
+    win.on('focus', () => note('window focused'));
+    win.on('blur', () => note('window lost focus'));
+    contents.on('did-start-loading', () => note(`page loading ${pageOf(contents) || ''}`));
+    contents.on('did-finish-load', () => note('page loaded'));
+    contents.on('did-fail-load', (_e, code, desc, url, isMain) => { if (isMain) note(`page failed to load: ${code} ${desc}`); });
+    contents.on('preload-error', (_e, _p, error) => note(`preload error: ${error && error.message}`));
+    // Clicks and keys that reach the window (counted, never what was typed).
+    contents.on('input-event', (_e, input) => {
+      if (!input) return;
+      if (input.type === 'mouseDown') live.lastMouse = Date.now();
+      else if (input.type === 'keyDown' || input.type === 'rawKeyDown') live.lastKey = Date.now();
+      else return;
+      if (live.hungSince) {
+        live.inputsWhileHung += 1;
+        if (live.inputsWhileHung === 1 || live.inputsWhileHung % 10 === 0) note(`${input.type === 'mouseDown' ? 'click' : 'key'} while not responding (${live.inputsWhileHung})`);
+      }
+    });
+    // The page's console warnings and errors, Chromium's own included (WebGL context lost, GPU stalls, media errors).
+    contents.on('console-message', (e, level, message) => {
+      const lv = e && typeof e.level === 'string' ? e.level : ['verbose', 'info', 'warning', 'error'][level];
+      const text = e && typeof e.message === 'string' ? e.message : message;
+      if (lv === 'warning' || lv === 'error') note(`console ${lv}: ${text}`);
+    });
+
     let hungAt = 0;
-    let asking = false;
+    let asking = null; // the AbortController of the Wait / Reload box while it is open
     let askTimer = null;
+    // (1.5.6) The box closes itself when the window comes back or its page is reloaded: before, it stayed open
+    // over a window that already worked again, and the window took no clicks until it was answered.
+    const closeAsk = (why) => {
+      clearTimeout(askTimer);
+      if (asking) {
+        note(`"not responding" box closed by itself (${why})`);
+        asking.abort();
+        asking = null;
+        live.dialog = '';
+      }
+    };
     win.on('unresponsive', () => {
       if (!hungAt) hungAt = Date.now();
+      live.hungSince = hungAt;
+      live.inputsWhileHung = 0;
+      note('window not responding');
       clearTimeout(askTimer);
       askTimer = setTimeout(async () => {
         if (!hungAt || asking || win.isDestroyed()) return;
-        asking = true;
+        const since = hungAt;
+        const ctl = new AbortController();
+        asking = ctl;
+        live.dialog = 'Ubex Chat is not responding (Wait / Reload)';
+        note('"not responding" box shown');
         const { response } = await dialog.showMessageBox(win, {
           type: 'warning',
           title: 'Ubex Chat is not responding',
@@ -348,27 +559,41 @@ if (needsX11) {
           buttons: ['Wait', 'Reload'],
           defaultId: 0,
           cancelId: 0,
+          signal: ctl.signal,
         });
-        asking = false;
+        if (ctl.signal.aborted) return;
+        asking = null;
+        live.dialog = '';
+        note(`"not responding" box answered: ${response === 1 ? 'Reload' : 'Wait'}`);
         if (response === 1 && !win.isDestroyed()) {
-          recordHealth('The window stopped responding and was reloaded', [`Not responding for ${Math.round((Date.now() - hungAt) / 1000)} s before Reload`],
-            { page: pageOf(contents), duration: Date.now() - hungAt });
+          recordHealth('The window stopped responding and was reloaded', [`Not responding for ${Math.round((Date.now() - since) / 1000)} s before Reload`],
+            { page: pageOf(contents), duration: Date.now() - since });
           hungAt = 0;
+          live.hungSince = 0;
           try { contents.forcefullyCrashRenderer(); } catch (e) {}
           contents.reload();
         }
       }, HANG_ASK_MS);
     });
     win.on('responsive', () => {
-      clearTimeout(askTimer);
+      closeAsk('the window responds again');
       if (!hungAt) return;
       const took = Date.now() - hungAt;
       hungAt = 0;
-      recordHealth('The window stopped responding', [`Not responding for ${(took / 1000).toFixed(1)} s, then recovered`], { page: pageOf(contents), duration: took });
+      live.hungSince = 0;
+      note(`window responding again after ${(took / 1000).toFixed(1)} s`);
+      recordHealth('The window stopped responding', [`Not responding for ${(took / 1000).toFixed(1)} s, then recovered`, `Clicks/keys sent to it meanwhile: ${live.inputsWhileHung}`],
+        { page: pageOf(contents), duration: took });
     });
     contents.on('render-process-gone', (_event, details) => {
       if (!details || details.reason === 'clean-exit') return;
-      recordHealth(`The page crashed (${details.reason})`, [`Exit code ${details.exitCode}`], { page: pageOf(contents) });
+      note(`page process gone: ${details.reason}, exit code ${details.exitCode}`);
+      closeAsk('the page crashed and is reloaded');
+      const hungFor = hungAt ? Date.now() - hungAt : 0;
+      hungAt = 0;
+      live.hungSince = 0;
+      recordHealth(`The page crashed (${details.reason})`, [`Exit code ${details.exitCode}${details.exitCode === 133 ? ' (SIGTRAP: Chromium stopped it on purpose after an internal check failed — often the GPU or the graphics driver)' : ''}`,
+        hungFor ? `It had not been responding for ${(hungFor / 1000).toFixed(1)} s before` : 'It was responding until then'], { page: pageOf(contents) });
       setTimeout(() => {
         if (!win.isDestroyed()) contents.reload();
       }, 1000);
@@ -386,6 +611,8 @@ if (needsX11) {
     while (gpuFails.length && now - gpuFails[0] > 30 * 60 * 1000) gpuFails.shift();
     if (gpuFails.length < 2 || gpuAsked || GRAPHICS === 'software' || !mainWindow || mainWindow.isDestroyed()) return;
     gpuAsked = true;
+    live.dialog = 'Graphics problem (Not now / Turn off and restart)';
+    note('"graphics problem" box shown');
     const { response } = await dialog.showMessageBox(mainWindow, {
       type: 'warning',
       title: 'Graphics problem',
@@ -396,6 +623,8 @@ if (needsX11) {
       defaultId: 1,
       cancelId: 0,
     });
+    live.dialog = '';
+    note(`"graphics problem" box answered: ${response === 1 ? 'Turn off and restart' : 'Not now'}`);
     if (response !== 1) return;
     writeSettings({ graphics: 'software' });
     recordExit('quit');
@@ -428,6 +657,8 @@ if (needsX11) {
     });
     ipcMain.on('ubex:restart', (event) => {
       if (!fromApp(event)) return;
+      note(`restarting to draw with graphics "${savedGraphics()}"`);
+      writeRun(false);
       recordExit('quit');
       relaunch();
     });
@@ -444,10 +675,44 @@ if (needsX11) {
   }
 
   function setUpHealth() {
-    app.on('before-quit', () => recordExit('quit'));
+    app.on('before-quit', () => {
+      note('quitting');
+      recordExit('quit');
+    });
     try {
-      powerMonitor.on('shutdown', () => recordExit('shutdown'));
+      powerMonitor.on('shutdown', () => {
+        note('computer shutting down');
+        recordExit('shutdown');
+      });
+      powerMonitor.on('suspend', () => {
+        live.asleepAt = Date.now();
+        note('computer going to sleep');
+        writeRun(false);
+      });
+      powerMonitor.on('resume', () => {
+        note(`computer woke up${live.asleepAt ? ` after ${Math.round((Date.now() - live.asleepAt) / 60000)} min` : ''}`);
+        live.asleepAt = 0;
+        lastRunTick = Date.now();
+      });
+      powerMonitor.on('lock-screen', () => note('screen locked'));
+      powerMonitor.on('unlock-screen', () => note('screen unlocked'));
     } catch (e) {}
+    try {
+      const { screen } = require('electron');
+      const describe = (d) => `${d.size.width}x${d.size.height} at ${d.scaleFactor}x`;
+      screen.on('display-added', (_e, d) => note(`screen added: ${describe(d)}`));
+      screen.on('display-removed', (_e, d) => note(`screen removed: ${describe(d)}`));
+      screen.on('display-metrics-changed', (_e, d, changed) => note(`screen changed (${(changed || []).join(', ')}): ${describe(d)}`));
+    } catch (e) {}
+    app.on('gpu-info-update', () => {
+      try {
+        const g = app.getGPUFeatureStatus();
+        const now = `compositing ${g.gpu_compositing}, rasterization ${g.rasterization}, video decode ${g.video_decode}, webgl ${g.webgl}`;
+        if (now !== live.gpuStatus) note(`GPU status: ${now}`);
+        live.gpuStatus = now;
+      } catch (e) {}
+    });
+    watchRun();
     ipcMain.handle('ubex:last-exit', () => {
       try {
         return JSON.parse(fs.readFileSync(exitFile(), 'utf8'));
@@ -456,7 +721,9 @@ if (needsX11) {
       }
     });
     app.on('child-process-gone', (_event, details) => {
-      if (!details || details.reason === 'clean-exit') return;
+      if (!details) return;
+      note(`${details.type}${details.name ? ` (${details.name})` : ''} process ended: ${details.reason}, exit code ${details.exitCode}`);
+      if (details.reason === 'clean-exit') return;
       const what = details.type === 'GPU' ? 'The GPU process crashed' : `A ${details.name || details.type} process crashed`;
       recordHealth(`${what} (${details.reason})`, [`Type ${details.type}${details.serviceName ? `, ${details.serviceName}` : ''}, exit code ${details.exitCode}`],
         { page: mainWindow ? pageOf(mainWindow.webContents) : '' });
@@ -539,6 +806,8 @@ if (needsX11) {
   // and getSources returns just that one, so it is used as is. On Windows and X11 every
   // screen and window comes back, and the person picks one in picker.html.
   function pickSource(parent, sources) {
+    live.picker = true;
+    note(`screen-share picker opened (${sources.length} screens and windows)`);
     return new Promise((resolve) => {
       const picker = new BrowserWindow({
         parent,
@@ -557,6 +826,8 @@ if (needsX11) {
       const finish = (source) => {
         if (done) return;
         done = true;
+        live.picker = false;
+        note(`screen-share picker closed: ${source ? (source.id.startsWith('screen:') ? 'a screen chosen' : 'a window chosen') : 'cancelled'}`);
         ipcMain.removeHandler('picker:sources');
         ipcMain.removeAllListeners('picker:choose');
         if (!picker.isDestroyed()) picker.close();
@@ -722,11 +993,16 @@ if (needsX11) {
 
   function handleScreenShare(ses) {
     ses.setDisplayMediaRequestHandler(async (request, callback) => {
+      const asked = Date.now();
+      live.sharing = 'asking the system for the screens and windows';
+      note('screen share asked: listing screens and windows');
       try {
         const sources = await desktopCapturer.getSources({
           types: ['screen', 'window'],
           thumbnailSize: { width: 320, height: 180 },
         });
+        note(`screen share: ${sources.length} sources after ${((Date.now() - asked) / 1000).toFixed(1)} s`);
+        live.sharing = '';
         if (!sources.length) return callback({});
         const parent = BrowserWindow.getFocusedWindow() || mainWindow;
         const source = sources.length === 1 ? sources[0] : await pickSource(parent, sources);
@@ -735,7 +1011,10 @@ if (needsX11) {
         // Windows can share what the computer is playing along with the screen.
         if (process.platform === 'win32' && request.audioRequested) streams.audio = 'loopback';
         callback(streams);
+        note('screen share started');
       } catch (e) {
+        live.sharing = '';
+        note(`screen share failed: ${e && e.message}`);
         callback({});
       }
     });
@@ -803,8 +1082,11 @@ if (needsX11) {
       return true;
     }
     child.on('error', () => setUpdateState({ state: 'ready', failed: 'error' }));
+    note(`installing the update (${type}), asking for the password`);
     child.on('exit', (code) => {
+      note(`update install ended: code ${code}`);
       if (code === 0) {
+        writeRun(false);
         recordExit('quit');
         relaunch();
         return;
@@ -819,6 +1101,7 @@ if (needsX11) {
     ipcMain.handle('ubex:update-state', () => updateState);
     ipcMain.on('ubex:update-install', () => {
       if (!updater || updateState.state !== 'ready') return;
+      note(`"Restart to update" clicked (${updateState.version})`);
       if (installLinuxPackage()) return;
       updater.quitAndInstall(false, true);
     });
