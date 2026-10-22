@@ -1089,32 +1089,60 @@ if (needsX11) {
           ? `dnf install --nogpgcheck -y ${file}`
           : `rpm -Uvh --replacepkgs ${file}`
         : `dpkg -i ${file} || apt-get install -f -y`;
-    setUpdateState({ state: 'installing', failed: '' });
+    // (1.5.8) What to run by hand when the password window cannot open: shown in the banner to copy.
+    const command = type === 'rpm' ? `sudo dnf install ${file}` : `sudo apt install ${file}`;
+    setUpdateState({ state: 'installing', failed: '', detail: '', command });
     let child;
+    const started = Date.now();
     try {
-      child = require('child_process').spawn('pkexec', ['/bin/sh', '-c', script], { stdio: 'ignore' });
+      // stderr kept: pkexec and dnf say there why they stopped (1.5.8; before, it went nowhere).
+      child = require('child_process').spawn('pkexec', ['/bin/sh', '-c', script], { stdio: ['ignore', 'ignore', 'pipe'] });
     } catch (e) {
-      setUpdateState({ state: 'ready', failed: 'error' });
+      setUpdateState({ state: 'ready', failed: 'error', detail: String((e && e.message) || e).slice(0, 300) });
       return true;
     }
-    child.on('error', () => setUpdateState({ state: 'ready', failed: 'error' }));
+    let said = '';
+    if (child.stderr) child.stderr.on('data', (d) => { said = (said + d).slice(-4000); });
+    child.on('error', (e) => setUpdateState({ state: 'ready', failed: 'error', detail: String((e && e.message) || e).slice(0, 300) }));
     note(`installing the update (${type}), asking for the password`);
     child.on('exit', (code) => {
-      note(`update install ended: code ${code}`);
+      const took = Date.now() - started;
+      note(`update install ended: code ${code} after ${(took / 1000).toFixed(1)} s`);
       if (code === 0) {
         writeRun(false);
         recordExit('quit');
         relaunch();
         return;
       }
-      // pkexec: 126 the password window was closed, 127 not authorised.
-      setUpdateState({ state: 'ready', failed: code === 126 || code === 127 ? 'cancelled' : 'error' });
+      // pkexec: 126 the password window was closed, 127 not authorised — or, within a moment and with no window
+      // ever shown, no password window could open at all (no authentication agent for this app): 'nowindow'.
+      const text = said.trim();
+      const nowindow = (code === 126 || code === 127) && (took < 2500 || /authentication agent|no session|not authorized/i.test(text));
+      const failed = nowindow ? 'nowindow' : code === 126 || code === 127 ? 'cancelled' : 'error';
+      const detail = text.split('\n').filter(Boolean).slice(-3).join(' ').slice(0, 300);
+      setUpdateState({ state: 'ready', failed, detail });
+      recordHealth('The update did not install', [
+        `Version ${updateState.version}, ${type} package ${path.basename(downloadedFile)}`,
+        `pkexec exit code ${code} after ${(took / 1000).toFixed(1)} s (${failed})`,
+        `What it said: ${text.slice(-1500) || 'nothing'}`,
+      ]);
     });
     return true;
   }
 
+  // (1.5.8) The downloaded package opened by the system's own installer (GNOME Software, Discover…), which asks
+  // for the password itself: the way in when pkexec cannot show its window. True when it opened.
+  async function openUpdatePackage() {
+    if (process.platform !== 'linux' || !downloadedFile || !fs.existsSync(downloadedFile)) return false;
+    note('opening the update package with the system installer');
+    const err = await shell.openPath(downloadedFile);
+    if (err) note(`could not open the package: ${err}`);
+    return !err;
+  }
+
   function setUpUpdates() {
     ipcMain.handle('ubex:update-state', () => updateState);
+    ipcMain.handle('ubex:update-open-package', () => openUpdatePackage());
     ipcMain.on('ubex:update-install', () => {
       if (!updater || updateState.state !== 'ready') return;
       note(`"Restart to update" clicked (${updateState.version})`);

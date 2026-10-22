@@ -19,6 +19,10 @@ contextBridge.exposeInMainWorld('ubexDesktop', {
     return () => ipcRenderer.removeListener('ubex:update', listener);
   },
   installUpdate: () => ipcRenderer.send('ubex:update-install'),
+  // (1.5.8 on, Linux) The downloaded .rpm / .deb opened in the system's own installer, which asks for the password
+  // itself: for when the update's password window cannot open. Resolves true when it opened. The update state also
+  // carries `detail` (why it failed) and `command` (the same install for a terminal) from 1.5.8 on.
+  openUpdatePackage: () => ipcRenderer.invoke('ubex:update-open-package'),
   // A Google Meet link in a window of the desktop app's own (1.4.0 on), instead of the browser.
   // The web app checks for this before using it (shared/meet-window.js).
   openGoogleMeet: (url) => ipcRenderer.send('ubex:open-meet', String(url || '')),
