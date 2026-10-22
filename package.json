@@ -1,7 +1,7 @@
 {
   "name": "ubex-chat",
   "productName": "Ubex Chat",
-  "version": "1.5.8",
+  "version": "1.5.9",
   "description": "Ubex Chat for the desktop",
   "homepage": "https://chat.ubex.ai",
   "author": {
@@ -32,6 +32,7 @@
     "files": [
       "main.js",
       "preload.js",
+      "project-code.js",
       "picker.html",
       "picker-preload.js",
       "build/icon.png"

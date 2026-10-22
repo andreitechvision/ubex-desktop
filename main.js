@@ -1317,6 +1317,8 @@ if (needsX11) {
     setUpNotifications();
     setUpHealth();
     setUpGraphics();
+    // (1.5.9) A project's code: folders, git and ZIPs for the web app's Code button.
+    require('./project-code.js')({ ipcMain, dialog, shell, app, isAppUrl, window: () => mainWindow, note });
     // Once the GPU process is up, so the first health report already names the card and driver.
     setTimeout(readGpu, 5000);
     mainWindow = createWindow(appUrlFromArgs(process.argv));

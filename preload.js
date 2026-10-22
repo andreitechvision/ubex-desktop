@@ -61,6 +61,20 @@ contextBridge.exposeInMainWorld('ubexDesktop', {
   graphics: () => ipcRenderer.invoke('ubex:graphics'),
   setGraphics: (mode) => ipcRenderer.invoke('ubex:graphics-set', String(mode || '')),
   restart: () => ipcRenderer.send('ubex:restart'),
+  // (1.5.9 on) A project's code on this computer (project-code.js): `key` is '<project id>|<owner>/<name>'. The folder
+  // is the one picked in the app's own folder window; the page never names a path.
+  //   status(key) -> {path, state: 'none' | 'missing' | 'empty' | 'other' | 'repo', repo, branch, changed, git}
+  //   pick(key) -> the same, after the folder window; forget(key); open(key)
+  //   sync({key, branch, token}) -> {ok, action: 'cloned' | 'pulled' | 'up-to-date', message, output, code, status}
+  //   download({repo, branch, token}) -> {ok, path} | {ok: false, cancelled} | {ok: false, message}
+  code: {
+    status: (key) => ipcRenderer.invoke('ubex:code-status', String(key || '')),
+    pick: (key) => ipcRenderer.invoke('ubex:code-pick', String(key || '')),
+    forget: (key) => ipcRenderer.invoke('ubex:code-forget', String(key || '')),
+    open: (key) => ipcRenderer.invoke('ubex:code-open', String(key || '')),
+    sync: ({ key, branch, token }) => ipcRenderer.invoke('ubex:code-sync', { key: String(key || ''), branch: String(branch || ''), token: String(token || '') }),
+    download: ({ repo, branch, token }) => ipcRenderer.invoke('ubex:code-download', { repo: String(repo || ''), branch: String(branch || ''), token: String(token || '') }),
+  },
   // The zoom level in percent, each time Ctrl + / - / 0 or Ctrl + wheel changes it (1.2.0 on).
   onZoom: (callback) => {
     const listener = (_event, percent) => callback(percent);
