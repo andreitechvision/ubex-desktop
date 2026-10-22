@@ -111,9 +111,11 @@ function savedGraphics() {
 }
 
 // Start again: after an update, or to draw another way. An AppImage is started from its file, not from the
-// folder it mounted (which goes away when this process ends).
-function relaunch(extraArgs) {
-  const args = process.argv.slice(1).filter((a) => !a.startsWith('ubex-chat://') && a !== X11_SWITCH);
+// folder it mounted (which goes away when this process ends). `keepLink`: the ubex-chat:// link this process
+// was started for goes along (the X11 restart of a link click, which then reaches the open window); an update's
+// restart does not reopen an old link.
+function relaunch(extraArgs, keepLink) {
+  const args = process.argv.slice(1).filter((a) => (keepLink || !a.startsWith('ubex-chat://')) && a !== X11_SWITCH);
   const opts = { args: [...args, ...(extraArgs || [])] };
   if (process.env.APPIMAGE) opts.execPath = process.env.APPIMAGE;
   app.relaunch(opts);
@@ -126,7 +128,7 @@ if (GRAPHICS === 'software') app.disableHardwareAcceleration();
 const needsX11 = GRAPHICS === 'x11' && onWayland && !process.argv.includes(X11_SWITCH);
 
 if (needsX11) {
-  relaunch([X11_SWITCH]);
+  relaunch([X11_SWITCH], true);
 } else if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
