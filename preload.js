@@ -73,7 +73,10 @@ contextBridge.exposeInMainWorld('ubexDesktop', {
     forget: (key) => ipcRenderer.invoke('ubex:code-forget', String(key || '')),
     open: (key) => ipcRenderer.invoke('ubex:code-open', String(key || '')),
     sync: ({ key, branch, token }) => ipcRenderer.invoke('ubex:code-sync', { key: String(key || ''), branch: String(branch || ''), token: String(token || '') }),
-    download: ({ repo, branch, token }) => ipcRenderer.invoke('ubex:code-download', { repo: String(repo || ''), branch: String(branch || ''), token: String(token || '') }),
+    download: ({ repo, branch, token, provider }) =>
+      ipcRenderer.invoke('ubex:code-download', { repo: String(repo || ''), branch: String(branch || ''), token: String(token || ''), provider: String(provider || 'github') }),
+    // (1.6.0) The hosts this app can get code from: a key's repository part is 'gitlab:<path>' for GitLab.
+    hosts: ['github', 'gitlab'],
   },
   // The zoom level in percent, each time Ctrl + / - / 0 or Ctrl + wheel changes it (1.2.0 on).
   onZoom: (callback) => {

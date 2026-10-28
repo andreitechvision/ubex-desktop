@@ -9,6 +9,10 @@
 // other programs can see, and it is never written into the repository's settings. The repository's remote is the
 // plain https://github.com/<owner>/<name>.git, so pulling from a terminal later uses the person's own git login.
 //
+// (1.6.0) GitLab too: a key whose repository part starts with `gitlab:` is a gitlab.com project (its path may have
+// subgroups: group/sub/name); its remote is https://gitlab.com/<path>.git and git signs in as oauth2 with the token.
+// GitHub keys are unchanged, so folders chosen before still match.
+//
 // A pull only fast-forwards. Changes made in the folder that clash with it stop it with git's own message, and
 // nothing is overwritten.
 
@@ -18,8 +22,20 @@ const { execFile } = require('child_process');
 const { Readable } = require('stream');
 const { pipeline } = require('stream/promises');
 
-const KEY = /^[A-Za-z0-9-]{1,64}\|[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
+const KEY = /^[A-Za-z0-9-]{1,64}\|(?:[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}|gitlab:[A-Za-z0-9_.-]{1,100}(?:\/[A-Za-z0-9_.-]{1,100}){1,20})$/;
 const REPO = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
+const GITLAB_REPO = /^[A-Za-z0-9_.-]{1,100}(?:\/[A-Za-z0-9_.-]{1,100}){1,20}$/;
+
+// Where a repository lives: its web host, how git signs in there, and its name in messages.
+const HOSTS = {
+  github: { name: 'GitHub', origin: 'https://github.com', user: 'x-access-token' },
+  gitlab: { name: 'GitLab', origin: 'https://gitlab.com', user: 'oauth2' },
+};
+// A key's repository part: 'owner/name' (GitHub) or 'gitlab:group/sub/name'.
+function repoOfKey(key) {
+  const part = String(key).split('|')[1] || '';
+  return part.startsWith('gitlab:') ? { provider: 'gitlab', repo: part.slice(7) } : { provider: 'github', repo: part };
+}
 const TOKEN = /^[A-Za-z0-9_]{20,255}$/;
 const GIT_TIMEOUT = 15 * 60 * 1000;
 
@@ -27,10 +43,14 @@ function validBranch(b) {
   return typeof b === 'string' && /^[A-Za-z0-9._\/-]{1,200}$/.test(b) && !b.startsWith('-') && !b.includes('..') && !b.endsWith('/') && !b.endsWith('.lock');
 }
 
-// github.com/<owner>/<name> from any of the ways a remote is written (https, ssh, with or without .git).
+// github.com/<owner>/<name> or gitlab.com/<group/.../name> from any of the ways a remote is written (https, ssh,
+// with or without .git), as '<owner>/<name>' or 'gitlab:<path>' — the same as the key's repository part.
 function repoOfRemote(url) {
-  const m = String(url || '').trim().match(/github\.com[:/]+([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?\/?$/i);
-  return m ? `${m[1]}/${m[2]}`.toLowerCase() : '';
+  const s = String(url || '').trim();
+  const m = s.match(/github\.com[:/]+([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?\/?$/i);
+  if (m) return `${m[1]}/${m[2]}`.toLowerCase();
+  const g = s.match(/gitlab\.com[:/]+((?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+?)(?:\.git)?\/?$/i);
+  return g ? `gitlab:${g[1]}`.toLowerCase() : '';
 }
 
 module.exports = function setUpProjectCode({ ipcMain, dialog, shell, app, isAppUrl, window: getWindow, note }) {
@@ -61,13 +81,14 @@ module.exports = function setUpProjectCode({ ipcMain, dialog, shell, app, isAppU
     writeStore(data);
   }
 
-  // git with the token for github.com only, for this one command. `token` may be empty (status reads).
-  function git(args, { cwd, token } = {}) {
+  // git with the token for the repository's host only, for this one command. `token` may be empty (status reads).
+  function git(args, { cwd, token, provider = 'github' } = {}) {
     const env = { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_SSH_COMMAND: 'ssh -o BatchMode=yes', LC_ALL: 'C' };
     if (token) {
+      const host = HOSTS[provider] || HOSTS.github;
       env.GIT_CONFIG_COUNT = '1';
-      env.GIT_CONFIG_KEY_0 = 'http.https://github.com/.extraheader';
-      env.GIT_CONFIG_VALUE_0 = `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}`;
+      env.GIT_CONFIG_KEY_0 = `http.${host.origin}/.extraheader`;
+      env.GIT_CONFIG_VALUE_0 = `AUTHORIZATION: basic ${Buffer.from(`${host.user}:${token}`).toString('base64')}`;
     }
     return new Promise((resolve) => {
       execFile('git', args, { cwd, env, timeout: GIT_TIMEOUT, maxBuffer: 16 * 1024 * 1024, windowsHide: true }, (error, stdout, stderr) => {
@@ -86,7 +107,7 @@ module.exports = function setUpProjectCode({ ipcMain, dialog, shell, app, isAppU
     return gitVersion;
   }
 
-  // What is in a folder: missing | empty | other (files, not a repository) | repo (with its GitHub repository,
+  // What is in a folder: missing | empty | other (files, not a repository) | repo (with its GitHub / GitLab repository,
   // branch and how many files are changed).
   async function describe(folder) {
     if (!folder) return { path: '', state: 'none' };
@@ -114,27 +135,28 @@ module.exports = function setUpProjectCode({ ipcMain, dialog, shell, app, isAppU
     return { ...info, git: await gitInstalled() };
   }
 
-  async function clone(repo, branch, target, token) {
+  async function clone({ provider, repo }, branch, target, token) {
     try {
       fs.mkdirSync(target, { recursive: true });
     } catch (e) {
       return { ok: false, message: `The folder could not be made: ${e.message}` };
     }
-    const r = await git(['clone', '--branch', branch, '--', `https://github.com/${repo}.git`, target], { token });
+    const r = await git(['clone', '--branch', branch, '--', `${HOSTS[provider].origin}/${repo}.git`, target], { token, provider });
     return r.ok
       ? { ok: true, action: 'cloned', message: `Got ${repo} (${branch}) into ${target}.`, output: r.output }
       : { ok: false, message: r.code === 'timeout' ? 'Getting the code took too long and was stopped.' : 'Git could not get the code.', output: r.output };
   }
 
-  async function pull(folder, branch, current, token) {
+  async function pull(folder, branch, current, token, provider) {
+    const where = HOSTS[provider].name;
     const steps = [];
     const run = async (args) => {
-      const r = await git(args, { cwd: folder, token });
+      const r = await git(args, { cwd: folder, token, provider });
       steps.push(`$ git ${args.join(' ')}\n${r.output}`.trim());
       return r;
     };
     let r = await run(['fetch', 'origin', branch]);
-    if (!r.ok) return { ok: false, message: 'Git could not fetch from GitHub.', output: steps.join('\n\n') };
+    if (!r.ok) return { ok: false, message: `Git could not fetch from ${where}.`, output: steps.join('\n\n') };
     if (current !== branch) {
       const local = await git(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], { cwd: folder });
       r = await run(local.ok ? ['switch', branch] : ['switch', '-c', branch, '--track', `origin/${branch}`]);
@@ -144,7 +166,7 @@ module.exports = function setUpProjectCode({ ipcMain, dialog, shell, app, isAppU
     if (!r.ok) {
       return {
         ok: false,
-        message: 'The folder has its own changes or commits that clash with GitHub, so nothing was changed. Sort them out with git, then pull again.',
+        message: `The folder has its own changes or commits that clash with ${where}, so nothing was changed. Sort them out with git, then pull again.`,
         output: steps.join('\n\n'),
       };
     }
@@ -160,7 +182,7 @@ module.exports = function setUpProjectCode({ ipcMain, dialog, shell, app, isAppU
   ipcMain.handle('ubex:code-pick', async (event, key) => {
     if (!fromApp(event) || !KEY.test(String(key))) return null;
     const win = getWindow();
-    const repo = key.split('|')[1];
+    const { repo } = repoOfKey(key);
     const res = await dialog.showOpenDialog(win || undefined, {
       title: `Folder for ${repo}`,
       buttonLabel: 'Use this folder',
@@ -171,7 +193,7 @@ module.exports = function setUpProjectCode({ ipcMain, dialog, shell, app, isAppU
     let folder = res.filePaths[0];
     // A folder of other things (~/Projects): the repository goes into a folder of its own name inside it.
     const info = await describe(folder);
-    if (info.state === 'other') folder = path.join(folder, repo.split('/')[1]);
+    if (info.state === 'other') folder = path.join(folder, repo.split('/').pop());
     remember(key, folder);
     note('project code: folder chosen');
     return status(key);
@@ -195,7 +217,8 @@ module.exports = function setUpProjectCode({ ipcMain, dialog, shell, app, isAppU
     if (!fromApp(event) || !KEY.test(String(key)) || !validBranch(branch) || !TOKEN.test(String(token))) {
       return { ok: false, message: 'That request could not be used.' };
     }
-    const repo = key.split('|')[1];
+    const where = repoOfKey(key);
+    const repo = where.provider === 'gitlab' ? `gitlab:${where.repo}` : where.repo;
     if (!(await gitInstalled())) {
       return { ok: false, code: 'no-git', message: 'Git is not installed on this computer. Install it (git-scm.com), or download the code as a ZIP.' };
     }
@@ -203,11 +226,11 @@ module.exports = function setUpProjectCode({ ipcMain, dialog, shell, app, isAppU
     if (!folder) return { ok: false, code: 'no-folder', message: 'Choose a folder first.' };
     const info = await describe(folder);
     let result;
-    if (info.state === 'missing' || info.state === 'empty') result = await clone(repo, branch, folder, token);
+    if (info.state === 'missing' || info.state === 'empty') result = await clone(where, branch, folder, token);
     else if (info.state === 'repo') {
       if (info.repo !== repo.toLowerCase()) {
-        result = { ok: false, message: `That folder holds ${info.repo || 'another repository'}, not ${repo}. Choose another folder.` };
-      } else result = await pull(folder, branch, info.branch, token);
+        result = { ok: false, message: `That folder holds ${info.repo || 'another repository'}, not ${where.repo}. Choose another folder.` };
+      } else result = await pull(folder, branch, info.branch, token, where.provider);
     } else {
       // Files but no repository (a ZIP unpacked there, say): git will not clone over them.
       result = { ok: false, message: 'That folder already has files that are not this repository. Choose an empty folder, or the folder that holds your copy.' };
@@ -216,13 +239,15 @@ module.exports = function setUpProjectCode({ ipcMain, dialog, shell, app, isAppU
     return { ...result, status: await status(key) };
   });
 
-  // The repository at a branch, as the ZIP GitHub makes, saved where the person chooses.
+  // The repository at a branch, as the ZIP GitHub or GitLab makes, saved where the person chooses.
   ipcMain.handle('ubex:code-download', async (event, req) => {
     const { repo, branch, token } = req || {};
-    if (!fromApp(event) || !REPO.test(String(repo)) || !validBranch(branch) || !TOKEN.test(String(token))) {
+    const provider = req && req.provider === 'gitlab' ? 'gitlab' : 'github';
+    if (!fromApp(event) || !(provider === 'gitlab' ? GITLAB_REPO : REPO).test(String(repo)) || !validBranch(branch) || !TOKEN.test(String(token))) {
       return { ok: false, message: 'That request could not be used.' };
     }
-    const name = `${repo.split('/')[1]}-${branch.replace(/[\/]/g, '-')}.zip`;
+    const host = HOSTS[provider].name;
+    const name = `${repo.split('/').pop()}-${branch.replace(/[\/]/g, '-')}.zip`;
     const res = await dialog.showSaveDialog(getWindow() || undefined, {
       title: `Download ${repo}`,
       defaultPath: path.join(app.getPath('downloads'), name),
@@ -231,11 +256,19 @@ module.exports = function setUpProjectCode({ ipcMain, dialog, shell, app, isAppU
     if (res.canceled || !res.filePath) return { ok: false, cancelled: true };
     try {
       // GitHub answers with a redirect to a short-lived download link; fetch drops the token when it follows it.
-      const reply = await fetch(`https://api.github.com/repos/${repo}/zipball/${branch}`, {
-        headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'User-Agent': 'Ubex-Chat-Desktop' },
+      // GitLab sends the archive itself.
+      const url =
+        provider === 'gitlab'
+          ? `https://gitlab.com/api/v4/projects/${encodeURIComponent(repo)}/repository/archive.zip?sha=${encodeURIComponent(branch)}`
+          : `https://api.github.com/repos/${repo}/zipball/${branch}`;
+      const reply = await fetch(url, {
+        headers:
+          provider === 'gitlab'
+            ? { Authorization: `Bearer ${token}`, 'User-Agent': 'Ubex-Chat-Desktop' }
+            : { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'User-Agent': 'Ubex-Chat-Desktop' },
       });
       if (!reply.ok || !reply.body) {
-        return { ok: false, message: reply.status === 404 ? 'GitHub says your account cannot read that repository or branch.' : `GitHub answered ${reply.status}.` };
+        return { ok: false, message: reply.status === 404 ? `${host} says your account cannot read that repository or branch.` : `${host} answered ${reply.status}.` };
       }
       const part = `${res.filePath}.part`;
       await pipeline(Readable.fromWeb(reply.body), fs.createWriteStream(part));
