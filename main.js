@@ -103,6 +103,7 @@ function appUrlFromArgs(argv) {
 const GRAPHICS_MODES = ['auto', 'x11', 'software'];
 const X11_SWITCH = '--ozone-platform=x11';
 const SHARE_LIST_MS = 8000; // how long the system gets to list the screens and windows
+const SHARE_CHOOSE_MS = 180000; // how long the system's own share dialog may stay open (Wayland)
 
 function savedGraphics() {
   try {
@@ -1023,14 +1024,16 @@ if (needsX11) {
     else openMeetWindow(url);
   }
 
-  // The system can take long over its list of windows, or never answer, and Electron then hands
-  // every later request the same unanswered list. Screens alone are quick.
-  function listSources(types) {
+  // Windows and X11: the system can take long over its list of windows, or never answer, and Electron
+  // then hands every later request the same unanswered list. Screens alone are quick.
+  // Wayland: the list IS the system's dialog, so it answers once the person has chosen, and asking
+  // again opens a second dialog. It only gets a much longer limit.
+  function listSources(types, ms) {
     let timer;
     return Promise.race([
       desktopCapturer.getSources({ types, thumbnailSize: { width: 320, height: 180 } }),
       new Promise((_resolve, reject) => {
-        timer = setTimeout(() => reject(new Error('the system did not list them in time')), SHARE_LIST_MS);
+        timer = setTimeout(() => reject(new Error('the system did not answer in time')), ms);
       }),
     ]).finally(() => clearTimeout(timer));
   }
@@ -1044,17 +1047,21 @@ if (needsX11) {
       }
       shareRunning = true;
       const asked = Date.now();
-      live.sharing = 'asking the system for the screens and windows';
+      live.sharing = onWayland ? 'the system share dialog is open' : 'asking the system for the screens and windows';
       note('screen share asked: listing screens and windows');
       try {
         let sources;
         let whole = true;
-        try {
-          sources = await listSources(['screen', 'window']);
-        } catch (e) {
-          note(`screen share: no list of windows (${e && e.message}), asking for the screens alone`);
-          whole = false;
-          sources = await listSources(['screen']);
+        if (onWayland) {
+          sources = await listSources(['screen', 'window'], SHARE_CHOOSE_MS);
+        } else {
+          try {
+            sources = await listSources(['screen', 'window'], SHARE_LIST_MS);
+          } catch (e) {
+            note(`screen share: no list of windows (${e && e.message}), asking for the screens alone`);
+            whole = false;
+            sources = await listSources(['screen'], SHARE_LIST_MS);
+          }
         }
         note(`screen share: ${sources.length} sources after ${((Date.now() - asked) / 1000).toFixed(1)} s`);
         live.sharing = '';
