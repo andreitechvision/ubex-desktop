@@ -102,6 +102,7 @@ function appUrlFromArgs(argv) {
 // needs a command-line switch, so the app starts itself again with it.
 const GRAPHICS_MODES = ['auto', 'x11', 'software'];
 const X11_SWITCH = '--ozone-platform=x11';
+const SHARE_LIST_MS = 8000; // how long the system gets to list the screens and windows
 
 function savedGraphics() {
   try {
@@ -821,6 +822,17 @@ if (needsX11) {
   // Screen sharing. On Wayland (Fedora's default) the system's own portal asks which screen
   // and getSources returns just that one, so it is used as is. On Windows and X11 every
   // screen and window comes back, and the person picks one in picker.html.
+  // The screen-share request in progress, and its picker. One at a time, across every window.
+  let shareRunning = false;
+  let sharePicker = null;
+
+  function raisePicker() {
+    if (!sharePicker || sharePicker.isDestroyed()) return;
+    sharePicker.show();
+    sharePicker.moveTop();
+    sharePicker.focus();
+  }
+
   function pickSource(parent, sources) {
     live.picker = true;
     note(`screen-share picker opened (${sources.length} screens and windows)`);
@@ -838,10 +850,14 @@ if (needsX11) {
         backgroundColor: background(),
         webPreferences: { preload: path.join(__dirname, 'picker-preload.js'), contextIsolation: true, sandbox: true },
       });
+      sharePicker = picker;
+      // A modal window can still open behind its parent on some Linux desktops.
+      picker.once('ready-to-show', raisePicker);
       let done = false;
       const finish = (source) => {
         if (done) return;
         done = true;
+        sharePicker = null;
         live.picker = false;
         note(`screen-share picker closed: ${source ? (source.id.startsWith('screen:') ? 'a screen chosen' : 'a window chosen') : 'cancelled'}`);
         ipcMain.removeHandler('picker:sources');
@@ -1007,21 +1023,45 @@ if (needsX11) {
     else openMeetWindow(url);
   }
 
+  // The system can take long over its list of windows, or never answer, and Electron then hands
+  // every later request the same unanswered list. Screens alone are quick.
+  function listSources(types) {
+    let timer;
+    return Promise.race([
+      desktopCapturer.getSources({ types, thumbnailSize: { width: 320, height: 180 } }),
+      new Promise((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error('the system did not list them in time')), SHARE_LIST_MS);
+      }),
+    ]).finally(() => clearTimeout(timer));
+  }
+
   function handleScreenShare(ses) {
     ses.setDisplayMediaRequestHandler(async (request, callback) => {
+      if (shareRunning) {
+        note('screen share asked again while one is running: raising its picker');
+        raisePicker();
+        return callback({});
+      }
+      shareRunning = true;
       const asked = Date.now();
       live.sharing = 'asking the system for the screens and windows';
       note('screen share asked: listing screens and windows');
       try {
-        const sources = await desktopCapturer.getSources({
-          types: ['screen', 'window'],
-          thumbnailSize: { width: 320, height: 180 },
-        });
+        let sources;
+        let whole = true;
+        try {
+          sources = await listSources(['screen', 'window']);
+        } catch (e) {
+          note(`screen share: no list of windows (${e && e.message}), asking for the screens alone`);
+          whole = false;
+          sources = await listSources(['screen']);
+        }
         note(`screen share: ${sources.length} sources after ${((Date.now() - asked) / 1000).toFixed(1)} s`);
         live.sharing = '';
         if (!sources.length) return callback({});
         const parent = BrowserWindow.getFocusedWindow() || mainWindow;
-        const source = sources.length === 1 ? sources[0] : await pickSource(parent, sources);
+        // Never share a whole screen unasked just because the windows did not make the list.
+        const source = sources.length === 1 && whole ? sources[0] : await pickSource(parent, sources);
         if (!source) return callback({});
         const streams = { video: source };
         // Windows can share what the computer is playing along with the screen.
@@ -1032,6 +1072,8 @@ if (needsX11) {
         live.sharing = '';
         note(`screen share failed: ${e && e.message}`);
         callback({});
+      } finally {
+        shareRunning = false;
       }
     });
   }
