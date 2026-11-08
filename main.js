@@ -572,6 +572,9 @@ if (needsX11) {
             { page: pageOf(contents), duration: Date.now() - since });
           hungAt = 0;
           live.hungSince = 0;
+          // The crash below is ours: render-process-gone must not reload a second time (report L7).
+          reloadingFromHang = true;
+          setTimeout(() => { reloadingFromHang = false; }, 10000);
           try { contents.forcefullyCrashRenderer(); } catch (e) {}
           contents.reload();
         }
@@ -589,6 +592,11 @@ if (needsX11) {
     });
     contents.on('render-process-gone', (_event, details) => {
       if (!details || details.reason === 'clean-exit') return;
+      if (reloadingFromHang) {
+        reloadingFromHang = false;
+        note(`page process ended for the Reload asked in the "not responding" box (${details.reason})`);
+        return;
+      }
       note(`page process gone: ${details.reason}, exit code ${details.exitCode}`);
       closeAsk('the page crashed and is reloaded');
       const hungFor = hungAt ? Date.now() - hungAt : 0;
@@ -596,10 +604,50 @@ if (needsX11) {
       live.hungSince = 0;
       recordHealth(`The page crashed (${details.reason})`, [`Exit code ${details.exitCode}${details.exitCode === 133 ? ' (SIGTRAP: Chromium stopped it on purpose after an internal check failed — often the GPU or the graphics driver)' : ''}`,
         hungFor ? `It had not been responding for ${(hungFor / 1000).toFixed(1)} s before` : 'It was responding until then'], { page: pageOf(contents) });
+      // Report L7: a page that crashes again and again was reloaded every second, for good. Now 1 s, then 5 s, then
+      // 30 s; after 3 crashes in 5 minutes it stops and asks (Reload / Quit), saying what usually helps.
+      const now = Date.now();
+      pageCrashes.push(now);
+      while (pageCrashes.length && now - pageCrashes[0] > 5 * 60 * 1000) pageCrashes.shift();
+      if (pageCrashes.length >= 3) {
+        note(`page crashed ${pageCrashes.length} times in 5 min: not reloading by itself`);
+        askAfterCrashes(win);
+        return;
+      }
+      const wait = [1000, 5000, 30000][pageCrashes.length - 1] || 30000;
       setTimeout(() => {
         if (!win.isDestroyed()) contents.reload();
-      }, 1000);
+      }, wait);
     });
+  }
+
+  let reloadingFromHang = false;
+  const pageCrashes = [];
+  let crashAsking = false;
+  async function askAfterCrashes(win) {
+    if (crashAsking || win.isDestroyed()) return;
+    crashAsking = true;
+    live.dialog = 'Ubex Chat keeps crashing (Reload / Quit)';
+    note('"keeps crashing" box shown');
+    const { response } = await dialog.showMessageBox(win, {
+      type: 'error',
+      title: 'Ubex Chat keeps crashing',
+      message: 'Ubex Chat keeps crashing on this computer',
+      detail:
+        'The page stopped three times in a few minutes, so it is not reloaded again by itself. This usually comes from the graphics driver: Settings \u2192 Desktop app \u2192 Graphics \u2192 Software often fixes it.',
+      buttons: ['Reload', 'Quit'],
+      defaultId: 0,
+      cancelId: 0,
+    });
+    crashAsking = false;
+    live.dialog = '';
+    note(`"keeps crashing" box answered: ${response === 1 ? 'Quit' : 'Reload'}`);
+    if (response === 1) {
+      app.quit();
+      return;
+    }
+    pageCrashes.length = 0;
+    if (!win.isDestroyed()) win.webContents.reload();
   }
 
   // The GPU process failing again and again is the graphics driver (it is what freezes the window or a call's
@@ -670,6 +718,9 @@ if (needsX11) {
   // asks (ubexDesktop.lastExit) so a session that ended that way is not reported as "closed unexpectedly"
   // (SUPPORT-SECURITY-AUDIT.md L6).
   const exitFile = () => path.join(app.getPath('userData'), 'last-exit.json');
+  // The app is ending on purpose (quit, a shutdown, a logout's signal): its processes going is not a crash (L8).
+  let ending = false;
+  const CHILD_GONE_WAIT_MS = 5000;
   function recordExit(why) {
     try {
       fs.writeFileSync(exitFile(), JSON.stringify({ at: Date.now(), why }));
@@ -678,11 +729,27 @@ if (needsX11) {
 
   function setUpHealth() {
     app.on('before-quit', () => {
+      ending = true;
       note('quitting');
       recordExit('quit');
     });
+    // Report L8: a logout or a shutdown ends the app with a signal; it was reported as a crash (its processes
+    // "crashed", and the next start said it was "closed or killed without quitting"). Now it is an exit.
+    for (const sig of ['SIGTERM', 'SIGHUP']) {
+      try {
+        process.on(sig, () => {
+          ending = true;
+          note(`ended by the system (${sig})`);
+          recordExit('ended');
+          app.quit();
+          // A window held open (a "leave this page?" in a call) must not keep a logout waiting on the app.
+          setTimeout(() => app.exit(0), 3000).unref();
+        });
+      } catch (e) {}
+    }
     try {
       powerMonitor.on('shutdown', () => {
+        ending = true;
         note('computer shutting down');
         recordExit('shutdown');
       });
@@ -725,11 +792,17 @@ if (needsX11) {
     app.on('child-process-gone', (_event, details) => {
       if (!details) return;
       note(`${details.type}${details.name ? ` (${details.name})` : ''} process ended: ${details.reason}, exit code ${details.exitCode}`);
-      if (details.reason === 'clean-exit') return;
-      const what = details.type === 'GPU' ? 'The GPU process crashed' : `A ${details.name || details.type} process crashed`;
-      recordHealth(`${what} (${details.reason})`, [`Type ${details.type}${details.serviceName ? `, ${details.serviceName}` : ''}, exit code ${details.exitCode}`],
-        { page: mainWindow ? pageOf(mainWindow.webContents) : '' });
-      if (details.type === 'GPU') gpuFailed();
+      if (details.reason === 'clean-exit' || ending) return;
+      const page = mainWindow ? pageOf(mainWindow.webContents) : '';
+      // Report L8: recorded a moment later, and only if the app is not ending meanwhile — at a logout or a shutdown
+      // its processes are killed first (and if the whole app is killed, nothing is recorded at all).
+      setTimeout(() => {
+        if (ending) return;
+        const what = details.type === 'GPU' ? 'The GPU process crashed' : `A ${details.name || details.type} process crashed`;
+        recordHealth(`${what} (${details.reason})`, [`Type ${details.type}${details.serviceName ? `, ${details.serviceName}` : ''}, exit code ${details.exitCode}`],
+          { page });
+        if (details.type === 'GPU') gpuFailed();
+      }, CHILD_GONE_WAIT_MS);
     });
     // What has not been sent yet; the web app sends them and they are marked.
     ipcMain.handle('ubex:health-events', () => {
@@ -1130,8 +1203,16 @@ if (needsX11) {
   function installLinuxPackage() {
     if (process.platform !== 'linux' || process.env.APPIMAGE || !downloadedFile || !fs.existsSync(downloadedFile)) return false;
     const type = packageType();
-    if ((type !== 'rpm' && type !== 'deb') || !hasCommand('pkexec')) return false;
+    if (type !== 'rpm' && type !== 'deb') return false;
     const file = `'${downloadedFile.replace(/'/g, `'\\''`)}'`;
+    // Report L9: no pkexec, so no password window: the updater's own install failed silently. Now the banner says
+    // how to install it by hand (Software, or the command to copy).
+    if (!hasCommand('pkexec')) {
+      const byHand = type === 'rpm' ? `sudo dnf install ${file}` : `sudo apt install ${file}`;
+      note('update ready, but this computer has no pkexec: installing by hand');
+      setUpdateState({ state: 'ready', failed: 'nowindow', detail: 'This computer has no password window for installing (pkexec).', command: byHand });
+      return true;
+    }
     const script =
       type === 'rpm'
         ? hasCommand('dnf')
@@ -1339,10 +1420,44 @@ if (needsX11) {
     });
   }
 
+  // Report H1: a link opened in the app (an email, the browser's "Open in Ubex Chat", the sign-in hand-off) used to
+  // load the window again, which dropped a call in progress and any unsent text. The running page is handed the link
+  // and opens it in place (or, for a page it cannot open in place, loads it once no call is on). A page that does not
+  // answer — an older web app, none loaded, a crashed one — is loaded with it as before.
+  const OPEN_LINK_WAIT_MS = 1500;
+  const linkAnswers = new Map();
+  let linkSeq = 0;
+  ipcMain.on('ubex:open-link-done', (event, answer) => {
+    const done = linkAnswers.get(Number(answer && answer.id));
+    if (done && event.sender === done.contents) done.resolve(!!(answer && answer.ok));
+  });
+  function openInPage(win, url) {
+    const contents = win.webContents;
+    const loaded = !contents.isDestroyed() && !contents.isCrashed() && !contents.isLoading() && isAppUrl(contents.getURL());
+    if (!loaded) {
+      win.loadURL(url);
+      return;
+    }
+    const id = ++linkSeq;
+    new Promise((resolve) => {
+      linkAnswers.set(id, { contents, resolve });
+      setTimeout(() => resolve(false), OPEN_LINK_WAIT_MS);
+      try {
+        contents.send('ubex:open-link', { id, url });
+      } catch (e) {
+        resolve(false);
+      }
+    }).then((ok) => {
+      linkAnswers.delete(id);
+      note(`link ${ok ? 'opened in the page' : 'not taken by the page: loaded'}`);
+      if (!ok && !win.isDestroyed()) win.loadURL(url);
+    });
+  }
+
   app.on('second-instance', (_event, argv) => {
     if (!mainWindow) return;
     const url = appUrlFromArgs(argv);
-    if (url) mainWindow.loadURL(url);
+    if (url) openInPage(mainWindow, url);
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.show();
     mainWindow.focus();

@@ -46,6 +46,19 @@ contextBridge.exposeInMainWorld('ubexDesktop', {
   notify: ({ id, title, body, tag, icon }) => ipcRenderer.send('ubex:notify', { id, title, body, tag, icon: typeof icon === 'string' ? icon : '' }),
   // (1.5.5 on) Close the notification shown with that tag (a call's "Call from X" once the ring stops).
   closeNotification: (tag) => ipcRenderer.send('ubex:notify-close', String(tag || '')),
+  // (1.6.3) A link opened in the app while it runs (report H1): `callback(url)` opens it in the page and answers
+  // whether it did (true, or a promise of it); no answer in 1.5 s and the window loads the link instead.
+  onOpenLink: (callback) => {
+    const listener = (_event, msg) => {
+      const id = msg && msg.id;
+      Promise.resolve()
+        .then(() => callback(String((msg && msg.url) || '')))
+        .then((ok) => ipcRenderer.send('ubex:open-link-done', { id, ok: ok !== false }))
+        .catch(() => ipcRenderer.send('ubex:open-link-done', { id, ok: false }));
+    };
+    ipcRenderer.on('ubex:open-link', listener);
+    return () => ipcRenderer.removeListener('ubex:open-link', listener);
+  },
   onNotificationClick: (callback) => {
     const listener = (_event, id) => callback(id);
     ipcRenderer.on('ubex:notification-click', listener);
