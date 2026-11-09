@@ -907,7 +907,8 @@ if (needsX11) {
     sharePicker.focus();
   }
 
-  function pickSource(parent, sources) {
+  // `previews`: the same list with pictures, still coming when the picker opens (null: `sources` has them already).
+  function pickSource(parent, sources, previews = null) {
     live.picker = true;
     note(`screen-share picker opened (${sources.length} screens and windows)`);
     return new Promise((resolve) => {
@@ -935,6 +936,7 @@ if (needsX11) {
         live.picker = false;
         note(`screen-share picker closed: ${source ? (source.id.startsWith('screen:') ? 'a screen chosen' : 'a window chosen') : 'cancelled'}`);
         ipcMain.removeHandler('picker:sources');
+        ipcMain.removeHandler('picker:previews');
         ipcMain.removeAllListeners('picker:choose');
         if (!picker.isDestroyed()) picker.close();
         resolve(source || null);
@@ -947,6 +949,13 @@ if (needsX11) {
           kind: s.id.startsWith('screen:') ? 'screen' : 'window',
           thumbnail: s.thumbnail && !s.thumbnail.isEmpty() ? s.thumbnail.toDataURL() : '',
         }))
+      );
+      // The pictures, when they come: the picker shows the names first and fills each tile in.
+      ipcMain.removeHandler('picker:previews');
+      ipcMain.handle('picker:previews', () =>
+        Promise.resolve(previews || sources)
+          .then((list) => list.map((s) => ({ id: s.id, thumbnail: s.thumbnail && !s.thumbnail.isEmpty() ? s.thumbnail.toDataURL() : '' })))
+          .catch(() => [])
       );
       ipcMain.once('picker:choose', (_event, id) => finish(sources.find((s) => s.id === id)));
       picker.on('closed', () => finish(null));
@@ -1101,10 +1110,11 @@ if (needsX11) {
   // then hands every later request the same unanswered list. Screens alone are quick.
   // Wayland: the list IS the system's dialog, so it answers once the person has chosen, and asking
   // again opens a second dialog. It only gets a much longer limit.
-  function listSources(types, ms) {
+  // `thumbs` false: names only, which Windows answers at once; the previews are what take it seconds (2026-11-09).
+  function listSources(types, ms, thumbs = true) {
     let timer;
     return Promise.race([
-      desktopCapturer.getSources({ types, thumbnailSize: { width: 320, height: 180 } }),
+      desktopCapturer.getSources({ types, thumbnailSize: thumbs ? { width: 320, height: 180 } : { width: 0, height: 0 } }),
       new Promise((_resolve, reject) => {
         timer = setTimeout(() => reject(new Error('the system did not answer in time')), ms);
       }),
@@ -1124,24 +1134,31 @@ if (needsX11) {
       note('screen share asked: listing screens and windows');
       try {
         let sources;
+        let previews = null;
         let whole = true;
         if (onWayland) {
           sources = await listSources(['screen', 'window'], SHARE_CHOOSE_MS);
         } else {
+          // Names first (quick), so the picker opens at once; the pictures follow into it. Waiting for the pictures
+          // left Windows users several seconds with nothing on screen, clicking Share again (2026-11-09).
+          let types = ['screen', 'window'];
           try {
-            sources = await listSources(['screen', 'window'], SHARE_LIST_MS);
+            sources = await listSources(types, SHARE_LIST_MS, false);
           } catch (e) {
             note(`screen share: no list of windows (${e && e.message}), asking for the screens alone`);
             whole = false;
-            sources = await listSources(['screen'], SHARE_LIST_MS);
+            types = ['screen'];
+            sources = await listSources(types, SHARE_LIST_MS, false);
           }
+          previews = listSources(types, SHARE_LIST_MS);
+          previews.catch(() => {});
         }
         note(`screen share: ${sources.length} sources after ${((Date.now() - asked) / 1000).toFixed(1)} s`);
         live.sharing = '';
         if (!sources.length) return callback({});
         const parent = BrowserWindow.getFocusedWindow() || mainWindow;
         // Never share a whole screen unasked just because the windows did not make the list.
-        const source = sources.length === 1 && whole ? sources[0] : await pickSource(parent, sources);
+        const source = sources.length === 1 && whole ? sources[0] : await pickSource(parent, sources, previews);
         if (!source) return callback({});
         const streams = { video: source };
         // Windows can share what the computer is playing along with the screen.

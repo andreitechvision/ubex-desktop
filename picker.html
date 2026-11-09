@@ -21,6 +21,8 @@
     .source { border: 2px solid var(--border); border-radius: 10px; background: none; color: inherit; padding: 6px; cursor: pointer; text-align: left; font: inherit; }
     .source:hover { background: var(--hover); }
     .source[aria-pressed="true"] { border-color: var(--primary); }
+    .source .blank { animation: pulse 1.2s ease-in-out infinite; }
+    @keyframes pulse { 50% { opacity: 0.55; } }
     .source img, .source .blank { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: contain; border-radius: 6px; background: var(--hover); }
     .source span { display: block; margin-top: 6px; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     footer { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--border); }
@@ -92,6 +94,15 @@
       const screens = all.filter((s) => s.kind === 'screen');
       if (screens.length === 1) { chosen = screens[0].id; share.disabled = false; }
       render();
+      // The pictures come a moment later (main.js pickSource): each tile is filled in as they arrive.
+      if (window.picker.previews && all.some((s) => !s.thumbnail)) {
+        window.picker.previews().then((pics) => {
+          const byId = {};
+          (pics || []).forEach((p) => { if (p.thumbnail) byId[p.id] = p.thumbnail; });
+          sources = sources.map((s) => (byId[s.id] ? Object.assign({}, s, { thumbnail: byId[s.id] }) : s));
+          render();
+        }).catch(() => {});
+      }
     });
   </script>
 </body>
